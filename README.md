@@ -7,7 +7,7 @@ Ce projet convertit l'[AWS Bookstore Demo App](https://github.com/aws-samples/aw
 
 Migration d'une architecture serverless AWS vers une architecture **Kubernetes serverless cloud-native** :
 
-- **Frontend** : React SPA servie via Nginx
+- **Frontend** : React SPA **statique sur Linode Object Storage + Akamai CDN** (exactement comme S3 + CloudFront !)
 - **Backend** : **Knative Serving** (serverless, scale-to-zero)
 - **Auth** : Keycloak (remplace Cognito)
 - **Databases** : **CloudNative-PG** 100% unifié (3 clusters PostgreSQL - TOUT !)
@@ -19,29 +19,53 @@ Migration d'une architecture serverless AWS vers une architecture **Kubernetes s
 ## Architecture Cloud-Native
 
 ```
-Akamai CDN → Istio Gateway → Frontend (React) + Knative Services (Serverless)
-                                                       ↓
-                                 ┌────────────────────┼────────────────────┐
-                                 │                    │                    │
-                         CloudNative-PG      CloudNative-PG       CloudNative-PG
-                            "main"              "search"             "graph"
-                         ━━━━━━━━━━━━        ━━━━━━━━━━━━        ━━━━━━━━━━━━
-                         • Products           • Full-text         • Apache AGE
-                         • Cart               • pg_trgm           • Graph DB
-                         • Orders             • ts_vector         • Cypher
-                         • Users              • Fuzzy search      • Recommendations
-                         • Cache (!)
-                         • Leaderboard (!)
-                                 │                    │                    │
-                                 └────────────────────┴────────────────────┘
-                                            Keycloak (Auth)
+┌──────────────────────────────────────────────────────────────────┐
+│                      User's Browser                              │
+└────────────┬──────────────────────────────┬──────────────────────┘
+             │                              │
+             │ Static Files                 │ API Calls
+             ▼                              ▼
+    ┌─────────────────┐           ┌──────────────────┐
+    │  Akamai CDN     │           │  Istio Gateway   │
+    │  (HTML/JS/CSS)  │           │  (API Routing)   │
+    └────────┬────────┘           └────────┬─────────┘
+             │                              │
+             ▼                              ▼
+    ┌─────────────────┐           ┌──────────────────┐
+    │ Linode Object   │           │ Knative Services │
+    │   Storage       │           │   (Serverless)   │
+    │  ─────────────  │           │  Scale-to-Zero   │
+    │ React Build:    │           └────────┬─────────┘
+    │ • index.html    │                    │
+    │ • bundle.js     │      ┌─────────────┼─────────────┐
+    │ • styles.css    │      │             │             │
+    └─────────────────┘┌─────▼──────┐┌────▼──────┐┌────▼──────┐
+                       │CloudNative ││CloudNative││CloudNative│
+                       │  PG "main" ││PG "search"││ PG "graph"│
+                       │━━━━━━━━━━━━││━━━━━━━━━━━││━━━━━━━━━━━│
+                       │• Products  ││• pg_trgm  ││• Apache   │
+                       │• Cart      ││• ts_vector││  AGE      │
+                       │• Orders    ││• FTS      ││• Cypher   │
+                       │• Users     ││• Fuzzy    ││• Reco     │
+                       │• Cache     ││           ││           │
+                       │• Board     ││           ││           │
+                       └────────────┘└───────────┘└───────────┘
+                                Keycloak (Auth)
 
-                          🎉 Redis supprimé - TOUT dans PostgreSQL ! 🎉
+    🎉 100% Serverless : Frontend (Object Storage) + Backend (Knative) 🎉
+         Pas de Redis, Elasticsearch, Neptune, ni pods frontend !
 ```
 
 ## Avantages de cette Architecture
 
-### ✅ Knative Serving
+### ✅ Frontend 100% Serverless (exactement comme AWS S3 + CloudFront)
+- **Pas de pods Kubernetes** : Juste des fichiers statiques sur Object Storage
+- **Linode Object Storage** : Compatible S3 API, ~$5/mois
+- **Akamai CDN** : Distribution globale, caching automatique
+- **Déploiement** : `npm build` + upload → C'est tout !
+- **Économies** : ~$15/mois vs Deployment Kubernetes avec pods frontend
+
+### ✅ Backend Knative Serving
 - **Scale-to-zero** : Pas de coûts quand pas de trafic
 - **Auto-scaling** : Scale basé sur les requêtes/sec
 - **Serverless natif** : Comme Lambda mais sur Kubernetes
