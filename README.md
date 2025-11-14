@@ -127,14 +127,16 @@ cd src/frontend && npm start
 # Appliquer les configurations de base de données
 kubectl apply -k kubernetes/base/databases/
 
-# Déployer l'API
-kubectl apply -k kubernetes/overlays/dev/api/
-
-# Déployer le frontend
-kubectl apply -k kubernetes/overlays/dev/frontend/
+# Déployer les APIs Knative (serverless)
+kubectl apply -k kubernetes/base/knative/
 
 # Configurer Istio Gateway
 kubectl apply -k kubernetes/base/gateway/
+
+# Déployer le frontend sur Object Storage (voir docs/frontend-deployment.md)
+cd src/frontend
+npm run build
+./deploy-frontend.sh
 ```
 
 ## Services Migrés (Cloud-Native)
@@ -145,7 +147,7 @@ kubectl apply -k kubernetes/base/gateway/
 | DynamoDB | **CloudNative-PG** cluster "main" | ✅ Implémenté |
 | Neptune (graph) | **CloudNative-PG** + Apache AGE (cluster "graph") | ✅ Implémenté |
 | Elasticsearch | **CloudNative-PG** + pg_trgm/ts_vector (cluster "search") | ✅ Implémenté |
-| ElastiCache (Redis) | **PostgreSQL** cache + leaderboard tables | ✅ Implémenté |
+| ElastiCache (Redis) | **PostgreSQL** cache (JSONB) + leaderboard (materialized view) | ✅ Implémenté |
 | Cognito | Keycloak | ✅ Configuré |
 | API Gateway | Istio Gateway + Knative | ✅ Configuré |
 | S3/CloudFront | Object Storage + Akamai CDN | ✅ Configuré |
@@ -172,19 +174,20 @@ kubectl apply -k kubernetes/base/gateway/
 ## Fonctionnalités
 
 - ✅ Plan de migration créé
-- 🚧 Structure du projet
-- ⏳ Configuration des bases de données
-- ⏳ API Backend
-- ⏳ Frontend React
+- ✅ Architecture 100% serverless (Knative + Object Storage)
+- ✅ 3 Clusters CloudNative-PG (main, search, graph)
+- ✅ Recherche full-text (PostgreSQL pg_trgm + ts_vector)
+- ✅ Graph DB pour recommandations (Apache AGE)
+- ✅ Cache et leaderboard (PostgreSQL JSONB + Materialized View)
+- ✅ Frontend déployé sur Object Storage + Akamai CDN
+- ⏳ API Backend (Knative Services)
 - ⏳ Authentification Keycloak
-- ⏳ Recherche (Elasticsearch)
-- ⏳ Recommandations
-- ⏳ Leaderboard (Redis)
-- ⏳ CI/CD Pipelines
+- ⏳ CI/CD Pipelines (Tekton)
 
 ## Documentation
 
 - [Plan de Migration](./MIGRATION_PLAN.md)
+- [Déploiement Frontend Object Storage](./docs/frontend-deployment.md)
 - [Architecture](./docs/architecture.md)
 - [Guide de Déploiement](./docs/deployment.md)
 - [Guide de Développement](./docs/development.md)

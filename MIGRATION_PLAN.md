@@ -34,8 +34,8 @@ Cette version utilise une approche **100% cloud-native** :
 ### 4. Stockage & CDN
 | AWS Service | Akamai/APL Équivalent | Notes |
 |-------------|----------------------|-------|
-| S3 | Linode Object Storage | Stockage d'objets compatible S3 |
-| CloudFront | Nginx/Istio Ingress + Akamai CDN | Distribution de contenu |
+| S3 (frontend) | Linode Object Storage | Fichiers statiques React (HTML/JS/CSS) |
+| CloudFront | Akamai CDN | Distribution globale avec caching |
 
 ### 5. CI/CD & Monitoring
 | AWS Service | Akamai/APL Équivalent | Notes |
@@ -69,46 +69,60 @@ Tous les besoins de données sont gérés par CloudNative-PG avec 3 clusters sp�
      (HA)              (Performance)      (Graph ops)
 ```
 
-## Architecture Cible avec Knative
+## Architecture Cible 100% Serverless
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Akamai CDN                            │
-└─────────────────────────────────────────────────────────┘
-                           │
-┌─────────────────────────────────────────────────────────┐
-│              Istio Gateway (Ingress)                     │
-└─────────────────────────────────────────────────────────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-┌───────▼────────┐  ┌──────▼─────────┐  ┌────▼────────┐
-│  Frontend      │  │ Knative Services │  │  Keycloak   │
-│  (React SPA)   │  │  (Serverless)    │  │   (Auth)    │
-│                │  │                  │  │             │
-│  • Nginx       │  │ • Products API   │  └─────────────┘
-│  • Static      │  │ • Cart API       │
-└────────────────┘  │ • Orders API     │
-                    │ • Search API     │
-                    │                  │
-                    │ 🔄 Auto-scaling  │
-                    │ 💤 Scale-to-zero │
-                    └──────┬───────────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-┌───────▼────────┐  ┌──────▼─────────┐  ┌────────▼────────┐
-│ CloudNative-PG │  │ CloudNative-PG │  │ CloudNative-PG  │
-│   "main"       │  │   "graph"      │  │   "search"      │
-│                │  │                │  │                 │
-│ • Products     │  │ • Apache AGE   │  │ • Full-text     │
-│ • Cart         │  │ • Social graph │  │ • ts_vector     │
-│ • Orders       │  │ • Recomm.      │  │ • pg_trgm       │
-│ • Users        │  │ • Cypher       │  │ • Fuzzy search  │
-│ • Cache (JSONB)│  └────────────────┘  └─────────────────┘
-│ • Leaderboard  │
-│   (Mat. View)  │  ✨ 100% PostgreSQL - Pas de Redis !
-└────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                         User's Browser                              │
+└────────────┬───────────────────────────────────┬────────────────────┘
+             │                                   │
+     Static Files (HTML/JS/CSS)          API Calls (/api/*)
+             │                                   │
+             ▼                                   ▼
+┌─────────────────────────┐         ┌────────────────────────────┐
+│     Akamai CDN          │         │    Istio Gateway (API)     │
+│  (Global Distribution)  │         │     (Ingress routing)      │
+└────────────┬────────────┘         └────────────┬───────────────┘
+             │                                   │
+             ▼                                   │
+┌─────────────────────────┐                     │
+│ Linode Object Storage   │                     │
+│   (S3-compatible)       │                     │
+│                         │                     │
+│  bookstore-frontend/    │         ┌───────────▼───────────┐
+│  • index.html           │         │  Knative Services     │
+│  • bundle.[hash].js     │         │   (Serverless)        │
+│  • styles.[hash].css    │         │                       │
+│  • assets/              │         │ • Products API        │
+│                         │         │ • Cart API            │
+│  Cache: 1 year (assets) │         │ • Orders API          │
+│         no-cache (HTML) │         │ • Search API          │
+└─────────────────────────┘         │ • Recommendations API │
+                                    │                       │
+      ┌──────────────┐              │ 🔄 Auto-scaling      │
+      │  Keycloak    │              │ 💤 Scale-to-zero     │
+      │   (Auth)     │              └───────────┬───────────┘
+      └──────────────┘                          │
+                                ┌───────────────┼───────────────┐
+                                │               │               │
+                      ┌─────────▼────────┐ ┌───▼────────┐ ┌───▼─────────┐
+                      │ CloudNative-PG   │ │CloudNative │ │CloudNative  │
+                      │    "main"        │ │  "graph"   │ │  "search"   │
+                      │                  │ │            │ │             │
+                      │ • Products       │ │• Apache AGE│ │• Full-text  │
+                      │ • Cart           │ │• Cypher    │ │• ts_vector  │
+                      │ • Orders         │ │• Social    │ │• pg_trgm    │
+                      │ • Users          │ │  graph     │ │• Fuzzy      │
+                      │ • Cache (JSONB)  │ │• Recomm.   │ │  search     │
+                      │ • Leaderboard    │ └────────────┘ └─────────────┘
+                      │   (Mat. View)    │
+                      └──────────────────┘
+
+         ✨ 100% Serverless Architecture ✨
+         Frontend: Object Storage + CDN (pas de pods)
+         Backend: Knative (scale-to-zero)
+         Databases: CloudNative-PG (PostgreSQL pour TOUT)
+         Pas de Redis, Elasticsearch, Neptune séparés !
 ```
 
 ## Structure du Projet
@@ -146,11 +160,13 @@ awsbookstoreconverter/
 - [ ] Configuration des connexions aux bases de données
 - [ ] Tests des endpoints API
 
-### Phase 3 : Frontend
+### Phase 3 : Frontend (100% Serverless)
 - [ ] Adaptation du code React pour Keycloak (remplacer Amplify/Cognito)
 - [ ] Configuration des URLs d'API
-- [ ] Containerisation de l'application React
-- [ ] Configuration du build et déploiement
+- [ ] Build de production React (npm run build)
+- [ ] Déploiement sur Linode Object Storage
+- [ ] Configuration Akamai CDN pour distribution globale
+- [ ] Setup cache headers (1 year pour assets, no-cache pour HTML)
 
 ### Phase 4 : DevOps & Déploiement
 - [ ] Création des Tekton Pipelines
@@ -368,10 +384,17 @@ SELECT * FROM leaderboard WHERE category = 'Programming' LIMIT 10; -- Par catég
 - **API** : REST avec auto-scaling Knative
 - **Containerisation** : Docker multi-stage
 
-### Frontend
+### Frontend - 100% Serverless (Object Storage + CDN)
 - **Framework** : React 18
 - **Auth** : Keycloak adapter (@react-keycloak/web)
-- **Build** : Nginx pour servir le SPA
+- **Hébergement** : Linode Object Storage (compatible S3)
+- **CDN** : Akamai CDN pour distribution globale
+- **Build** : Production build avec Vite/CRA
+- **Déploiement** : s3cmd ou linode-cli upload
+- **Cache Strategy** :
+  - Assets (JS/CSS/images) : `Cache-Control: public, max-age=31536000, immutable` (1 an)
+  - HTML : `Cache-Control: no-cache, no-store, must-revalidate`
+- **Coût estimé** : ~$5/mois (vs ~$20/mois pour pods Kubernetes)
 
 ### Bases de Données - Architecture CloudNative-PG Unifiée
 
@@ -398,11 +421,20 @@ SELECT * FROM leaderboard WHERE category = 'Programming' LIMIT 10; -- Par catég
 
 ## Prochaines Étapes
 
-1. Créer la structure de base du projet
-2. Configurer les manifests Kubernetes pour les bases de données
-3. Développer les services API de base
-4. Migrer le frontend React
-5. Configurer les pipelines Tekton
+1. ✅ Créer la structure de base du projet
+2. ✅ Architecture 100% serverless (Knative + Object Storage + CloudNative-PG)
+3. ✅ Migrations SQL (cache, leaderboard, search, graph)
+4. ✅ Services backend (cache, leaderboard, recommendations, search)
+5. ✅ Déploiement frontend Object Storage
+6. ⏳ Configurer les manifests Kubernetes pour les bases de données
+7. ⏳ Développer les services API Knative
+8. ⏳ Configurer Keycloak pour l'authentification
+9. ⏳ Configurer les pipelines Tekton pour CI/CD
+
+## Documentation Additionnelle
+
+- [Guide Déploiement Frontend Object Storage](./docs/frontend-deployment.md) - Déploiement React sur Linode Object Storage + Akamai CDN
+- [Script de Déploiement](./deploy-frontend.sh) - Automatisation du build et upload
 
 ## Estimations
 
