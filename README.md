@@ -161,9 +161,13 @@ kubectl apply -k kubernetes/base/gateway/
 
 **Fonctionnalités natives PostgreSQL** :
 - **JSONB** : Cache avec TTL (remplace Redis cache)
-- **Tables + INDEX** : Leaderboard avec ORDER BY (remplace Redis sorted sets)
+- **Materialized Views** : Leaderboard auto-calculé depuis orders (remplace Redis sorted sets)
+  - Refresh concurrentiel (non-bloquant)
+  - Score pondéré par récence et quantité
+  - Une seule source de vérité (orders table)
+  - Refresh automatique chaque minute via pg_cron
 - **Triggers** : Nettoyage automatique du cache expiré
-- **pg_cron** : Maintenance programmée (optionnel)
+- **pg_cron** : Refresh automatique du leaderboard + maintenance
 
 ## Fonctionnalités
 

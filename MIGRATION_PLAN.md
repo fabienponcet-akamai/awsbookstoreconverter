@@ -23,7 +23,7 @@ Cette version utilise une approche **100% cloud-native** :
 | DynamoDB | **CloudNative-PG** (cluster "main") | Tables relationnelles standard |
 | Amazon Neptune | **CloudNative-PG** (cluster "graph") + **Apache AGE** | Extension graph database pour PostgreSQL |
 | Elasticsearch | **CloudNative-PG** (cluster "search") + **pg_trgm + ts_vector** | Recherche full-text native PostgreSQL |
-| ElastiCache Redis | **Redis StatefulSet** | Cache et leaderboard (conservé) |
+| ElastiCache Redis | **CloudNative-PG** (cluster "main") + **Materialized Views** | Cache (JSONB + TTL) + Leaderboard (Materialized View auto-refresh) |
 
 ### 3. Authentification & Sécurité
 | AWS Service | Akamai/APL Équivalent | Notes |
@@ -97,21 +97,18 @@ Tous les besoins de données sont gérés par CloudNative-PG avec 3 clusters sp�
                            │
         ┌──────────────────┼──────────────────┐
         │                  │                  │
-┌───────▼────────┐  ┌──────▼─────┐  ┌────────▼────────┐
-│ CloudNative-PG │  │   Redis     │  │ CloudNative-PG  │
-│   "main"       │  │   Cache     │  │   "search"      │
-│                │  │ Leaderboard │  │                 │
-│ • Products     │  └─────────────┘  │ • Full-text     │
-│ • Cart         │                   │ • ts_vector     │
-│ • Orders       │  ┌─────────────┐  │ • pg_trgm       │
-│ • Users        │  │CloudNative- │  └─────────────────┘
-└────────────────┘  │  PG "graph" │
-                    │             │
-                    │ • Apache AGE│
-                    │ • Social    │
-                    │   graph     │
-                    │ • Recomm.   │
-                    └─────────────┘
+┌───────▼────────┐  ┌──────▼─────────┐  ┌────────▼────────┐
+│ CloudNative-PG │  │ CloudNative-PG │  │ CloudNative-PG  │
+│   "main"       │  │   "graph"      │  │   "search"      │
+│                │  │                │  │                 │
+│ • Products     │  │ • Apache AGE   │  │ • Full-text     │
+│ • Cart         │  │ • Social graph │  │ • ts_vector     │
+│ • Orders       │  │ • Recomm.      │  │ • pg_trgm       │
+│ • Users        │  │ • Cypher       │  │ • Fuzzy search  │
+│ • Cache (JSONB)│  └────────────────┘  └─────────────────┘
+│ • Leaderboard  │
+│   (Mat. View)  │  ✨ 100% PostgreSQL - Pas de Redis !
+└────────────────┘
 ```
 
 ## Structure du Projet
@@ -139,7 +136,7 @@ awsbookstoreconverter/
 ### Phase 1 : Infrastructure de Base ✓
 - [x] Analyse de l'architecture AWS
 - [ ] Configuration APL core
-- [ ] Déploiement des bases de données (PostgreSQL, Redis, Elasticsearch)
+- [ ] Déploiement des bases de données (3 clusters CloudNative-PG : main, graph, search)
 - [ ] Configuration Keycloak pour l'authentification
 
 ### Phase 2 : Backend
@@ -162,9 +159,9 @@ awsbookstoreconverter/
 - [ ] Tests d'intégration end-to-end
 
 ### Phase 5 : Fonctionnalités Avancées
-- [ ] Configuration du système de recommandations (graph DB)
-- [ ] Mise en place du leaderboard avec Redis
-- [ ] Configuration de la recherche Elasticsearch
+- [ ] Configuration du système de recommandations (Apache AGE graph DB)
+- [ ] Mise en place du leaderboard (Materialized View avec pg_cron)
+- [ ] Configuration de la recherche (PostgreSQL full-text avec pg_trgm)
 - [ ] Monitoring avec Prometheus/Grafana
 
 ## Décisions Techniques
@@ -275,6 +272,92 @@ FROM products
 WHERE title ILIKE 'java%'
 LIMIT 5;
 ```
+
+#### Materialized Views (Leaderboard) - Remplace Redis Sorted Sets
+
+**Pourquoi Materialized View au lieu d'une table manuelle ?**
+- ✅ **Une seule source de vérité** : Calcul automatique depuis la table `orders`
+- ✅ **Pas de risque de désynchronisation** : Impossible d'oublier de mettre à jour
+- ✅ **Refresh concurrentiel** : `REFRESH MATERIALIZED VIEW CONCURRENTLY` (non-bloquant)
+- ✅ **Scoring sophistiqué** : Pondération par récence, quantité, ratings
+- ✅ **Maintenance automatique** : pg_cron refresh chaque minute
+
+```sql
+-- Création de la materialized view
+CREATE MATERIALIZED VIEW leaderboard AS
+SELECT
+  p.id as book_id,
+  p.title,
+  p.author,
+  COUNT(DISTINCT o.id) as sales_count,
+  COALESCE(SUM(oi.quantity), 0) as total_quantity,
+  -- Score pondéré par récence (30 jours de decay)
+  COALESCE(
+    SUM(
+      oi.quantity *
+      EXTRACT(EPOCH FROM (NOW() - o.created_at)) / (86400.0 * 30)
+    ),
+    0
+  )::BIGINT as score,
+  COALESCE(AVG(r.rating), 0.0)::NUMERIC(3, 2) as rating_avg,
+  MAX(o.created_at) as last_purchase_at
+FROM products p
+LEFT JOIN order_items oi ON p.id = oi.product_id
+LEFT JOIN orders o ON oi.order_id = o.id AND o.status != 'cancelled'
+LEFT JOIN reviews r ON p.id = r.product_id
+GROUP BY p.id
+HAVING COUNT(DISTINCT o.id) > 0
+ORDER BY score DESC;
+
+-- Index unique requis pour REFRESH CONCURRENTLY
+CREATE UNIQUE INDEX idx_leaderboard_book_id ON leaderboard (book_id);
+CREATE INDEX idx_leaderboard_score ON leaderboard (score DESC);
+
+-- Fonction de refresh (non-bloquante)
+CREATE FUNCTION leaderboard_refresh() RETURNS void AS $$
+BEGIN
+  REFRESH MATERIALIZED VIEW CONCURRENTLY leaderboard;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Automatisation avec pg_cron (refresh chaque minute)
+SELECT cron.schedule('leaderboard-refresh', '* * * * *',
+  'SELECT leaderboard_refresh()');
+
+-- Ou trigger probabiliste (10% des orders déclenchent un refresh)
+CREATE FUNCTION leaderboard_refresh_on_order() RETURNS TRIGGER AS $$
+BEGIN
+  IF random() < 0.1 THEN
+    PERFORM leaderboard_refresh();
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER leaderboard_refresh_trigger
+  AFTER INSERT OR UPDATE ON orders
+  FOR EACH STATEMENT
+  EXECUTE FUNCTION leaderboard_refresh_on_order();
+
+-- Requêtes rapides sur la vue matérialisée
+SELECT * FROM leaderboard ORDER BY score DESC LIMIT 20; -- Top 20
+SELECT * FROM leaderboard WHERE category = 'Programming' LIMIT 10; -- Par catégorie
+```
+
+**Comparaison : Table manuelle vs Materialized View**
+
+| Aspect | Table Manuelle | Materialized View |
+|--------|----------------|-------------------|
+| Source de vérité | Double (orders + table) | Unique (orders) |
+| Risque de bug | Oublier de mettre à jour | Aucun (auto-calculé) |
+| Maintenance | Fonctions d'update manuelles | Refresh automatique |
+| Performances lecture | ⚡ Très rapide | ⚡ Très rapide |
+| Performances écriture | ⚡ Rapide (simple UPDATE) | ⚠️ Refresh périodique |
+| Temps réel | ✅ Immédiat | ⚠️ ~1 minute de lag |
+| Complexité code | Plus complexe | Plus simple |
+| Recommandé pour | Leaderboards temps réel | **Bestsellers (notre cas)** |
+
+**Verdict** : Pour un bookstore, un lag de 1 minute est acceptable → Materialized View est le meilleur choix !
 
 ## Décisions Techniques (Mise à Jour)
 

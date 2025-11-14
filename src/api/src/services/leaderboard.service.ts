@@ -15,9 +15,15 @@ export interface LeaderboardEntry {
   bookId: string;
   title: string;
   author: string;
+  isbn: string;
+  category: string;
+  price: number;
   score: number;
   salesCount: number;
+  totalQuantity: number;
   ratingAvg: number;
+  reviewCount: number;
+  lastPurchaseAt: Date | null;
 }
 
 export interface TrendingBook {
@@ -25,28 +31,55 @@ export interface TrendingBook {
   title: string;
   author: string;
   recentSales: number;
+  recentQuantity: number;
+  trendScore: number;
 }
 
+export interface BookRank {
+  rank: number;
+  bookId: string;
+  title: string;
+  score: number;
+  salesCount: number;
+}
+
+/**
+ * Leaderboard Service using PostgreSQL Materialized View
+ *
+ * Replaces Redis Sorted Sets with a PostgreSQL materialized view
+ * that automatically computes bestseller rankings from orders.
+ *
+ * Benefits over manual table updates:
+ * - Single source of truth (orders table)
+ * - No risk of getting out of sync
+ * - Automatic computation via scheduled refresh
+ * - Can refresh concurrently (non-blocking reads)
+ * - Weighted scoring by recency and quantity
+ *
+ * The materialized view is refreshed:
+ * - Every minute via pg_cron (recommended)
+ * - Or automatically after ~10% of orders via trigger
+ * - Or manually via refresh() method
+ */
 export class LeaderboardService {
   /**
-   * Increment book score (called after purchase)
+   * Refresh the leaderboard materialized view
+   * Called periodically by pg_cron or manually when needed
+   * Uses REFRESH MATERIALIZED VIEW CONCURRENTLY (non-blocking)
    */
-  async incrementScore(bookId: string, increment: number = 1): Promise<void> {
+  async refresh(): Promise<void> {
     try {
-      await leaderboardPool.query(
-        'SELECT leaderboard_increment_score($1::uuid, $2)',
-        [bookId, increment]
-      );
-
-      logger.info(`Incremented leaderboard score for book ${bookId} by ${increment}`);
+      await leaderboardPool.query('SELECT leaderboard_refresh()');
+      logger.info('Leaderboard materialized view refreshed successfully');
     } catch (error) {
-      logger.error(`Error incrementing leaderboard for book ${bookId}:`, error);
+      logger.error('Error refreshing leaderboard:', error);
       throw error;
     }
   }
 
   /**
    * Get top N bestselling books
+   * Queries the materialized view (very fast)
    */
   async getTop(limit: number = 20): Promise<LeaderboardEntry[]> {
     try {
@@ -59,9 +92,15 @@ export class LeaderboardService {
         bookId: row.book_id,
         title: row.title,
         author: row.author,
+        isbn: row.isbn,
+        category: row.category,
+        price: parseFloat(row.price),
         score: parseInt(row.score, 10),
         salesCount: parseInt(row.sales_count, 10),
-        ratingAvg: parseFloat(row.rating_avg)
+        totalQuantity: parseInt(row.total_quantity, 10),
+        ratingAvg: parseFloat(row.rating_avg),
+        reviewCount: parseInt(row.review_count, 10),
+        lastPurchaseAt: row.last_purchase_at ? new Date(row.last_purchase_at) : null
       }));
     } catch (error) {
       logger.error('Error getting top books from leaderboard:', error);
@@ -70,7 +109,38 @@ export class LeaderboardService {
   }
 
   /**
+   * Get top N bestselling books by category
+   */
+  async getTopByCategory(category: string, limit: number = 20): Promise<LeaderboardEntry[]> {
+    try {
+      const result = await leaderboardPool.query(
+        'SELECT * FROM leaderboard_get_top_by_category($1, $2)',
+        [category, limit]
+      );
+
+      return result.rows.map(row => ({
+        bookId: row.book_id,
+        title: row.title,
+        author: row.author,
+        isbn: '',
+        category: category,
+        price: 0,
+        score: parseInt(row.score, 10),
+        salesCount: parseInt(row.sales_count, 10),
+        totalQuantity: 0,
+        ratingAvg: parseFloat(row.rating_avg),
+        reviewCount: 0,
+        lastPurchaseAt: null
+      }));
+    } catch (error) {
+      logger.error(`Error getting top books for category ${category}:`, error);
+      throw error;
+    }
+  }
+
+  /**
    * Get trending books (most sales in last N days)
+   * Computed in real-time from orders (not from materialized view)
    */
   async getTrending(days: number = 7, limit: number = 20): Promise<TrendingBook[]> {
     try {
@@ -83,7 +153,9 @@ export class LeaderboardService {
         bookId: row.book_id,
         title: row.title,
         author: row.author,
-        recentSales: parseInt(row.recent_sales, 10)
+        recentSales: parseInt(row.recent_sales, 10),
+        recentQuantity: parseInt(row.recent_quantity, 10),
+        trendScore: parseInt(row.trend_score, 10)
       }));
     } catch (error) {
       logger.error('Error getting trending books:', error);
@@ -92,38 +164,27 @@ export class LeaderboardService {
   }
 
   /**
-   * Update book rating in leaderboard
-   */
-  async updateRating(bookId: string, rating: number): Promise<void> {
-    try {
-      await leaderboardPool.query(
-        'SELECT leaderboard_update_rating($1::uuid, $2)',
-        [bookId, rating]
-      );
-
-      logger.info(`Updated rating for book ${bookId}: ${rating}`);
-    } catch (error) {
-      logger.error(`Error updating rating for book ${bookId}:`, error);
-      throw error;
-    }
-  }
-
-  /**
    * Get book rank in leaderboard
    */
-  async getBookRank(bookId: string): Promise<number | null> {
+  async getBookRank(bookId: string): Promise<BookRank | null> {
     try {
       const result = await leaderboardPool.query(
-        `SELECT rank
-         FROM (
-           SELECT book_id, ROW_NUMBER() OVER (ORDER BY score DESC) as rank
-           FROM leaderboard
-         ) ranked
-         WHERE book_id = $1::uuid`,
+        'SELECT * FROM leaderboard_get_book_rank($1::uuid)',
         [bookId]
       );
 
-      return result.rows[0]?.rank ? parseInt(result.rows[0].rank, 10) : null;
+      if (result.rows.length === 0) {
+        return null;
+      }
+
+      const row = result.rows[0];
+      return {
+        rank: parseInt(row.rank, 10),
+        bookId: row.book_id,
+        title: row.title,
+        score: parseInt(row.score, 10),
+        salesCount: parseInt(row.sales_count, 10)
+      };
     } catch (error) {
       logger.error(`Error getting rank for book ${bookId}:`, error);
       return null;
