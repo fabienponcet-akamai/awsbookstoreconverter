@@ -1,0 +1,233 @@
+---
+# PrometheusRule for Bookstore API alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bookstore-api-alerts
+  namespace: bookstore
+  labels:
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: bookstore-api
+      interval: 30s
+      rules:
+        # High error rate alert
+        - alert: HighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{namespace="bookstore",status=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{namespace="bookstore"}[5m]))
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+            component: api
+          annotations:
+            summary: "High error rate in {{ $labels.service }}"
+            description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+
+        # API response time too high
+        - alert: HighResponseTime
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(http_request_duration_seconds_bucket{namespace="bookstore"}[5m])) by (service, le)
+            ) > 1
+          for: 10m
+          labels:
+            severity: warning
+            component: api
+          annotations:
+            summary: "High response time for {{ $labels.service }}"
+            description: "P95 latency is {{ $value }}s (threshold: 1s)"
+
+        # Service down alert
+        - alert: ServiceDown
+          expr: |
+            up{namespace="bookstore",job=~".*-api"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            component: api
+          annotations:
+            summary: "Service {{ $labels.job }} is down"
+            description: "Service has been down for more than 2 minutes"
+
+        # No pods available
+        - alert: NoPodsAvailable
+          expr: |
+            kube_deployment_status_replicas_available{namespace="bookstore"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            component: api
+          annotations:
+            summary: "No pods available for {{ $labels.deployment }}"
+            description: "Deployment has 0 available replicas"
+
+        # High memory usage
+        - alert: HighMemoryUsage
+          expr: |
+            (
+              container_memory_working_set_bytes{namespace="bookstore",container!=""}
+              /
+              container_spec_memory_limit_bytes{namespace="bookstore",container!=""}
+            ) > 0.9
+          for: 5m
+          labels:
+            severity: warning
+            component: api
+          annotations:
+            summary: "High memory usage in {{ $labels.pod }}"
+            description: "Memory usage is {{ $value | humanizePercentage }} of limit"
+
+        # High CPU usage
+        - alert: HighCPUUsage
+          expr: |
+            (
+              rate(container_cpu_usage_seconds_total{namespace="bookstore",container!=""}[5m])
+              /
+              container_spec_cpu_quota{namespace="bookstore",container!=""} * 100000
+            ) > 0.9
+          for: 10m
+          labels:
+            severity: warning
+            component: api
+          annotations:
+            summary: "High CPU usage in {{ $labels.pod }}"
+            description: "CPU usage is {{ $value | humanizePercentage }} of limit"
+---
+# PrometheusRule for PostgreSQL alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bookstore-database-alerts
+  namespace: bookstore
+  labels:
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: bookstore-postgres
+      interval: 30s
+      rules:
+        # Database down
+        - alert: PostgreSQLDown
+          expr: |
+            pg_up{namespace="bookstore"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            component: database
+          annotations:
+            summary: "PostgreSQL cluster {{ $labels.cluster }} is down"
+            description: "Database has been unreachable for more than 1 minute"
+
+        # Replication lag
+        - alert: PostgreSQLReplicationLag
+          expr: |
+            pg_replication_lag{namespace="bookstore"} > 30
+          for: 5m
+          labels:
+            severity: warning
+            component: database
+          annotations:
+            summary: "High replication lag in {{ $labels.cluster }}"
+            description: "Replication lag is {{ $value }}s (threshold: 30s)"
+
+        # Too many connections
+        - alert: PostgreSQLTooManyConnections
+          expr: |
+            sum by (cluster) (pg_stat_activity_count{namespace="bookstore"})
+            /
+            pg_settings_max_connections{namespace="bookstore"}
+            > 0.8
+          for: 5m
+          labels:
+            severity: warning
+            component: database
+          annotations:
+            summary: "Too many connections to {{ $labels.cluster }}"
+            description: "{{ $value | humanizePercentage }} of max connections used"
+
+        # Disk usage high
+        - alert: PostgreSQLDiskUsageHigh
+          expr: |
+            (
+              pg_database_size_bytes{namespace="bookstore"}
+              /
+              (1024*1024*1024*20)  # Assuming 20GB per instance
+            ) > 0.8
+          for: 10m
+          labels:
+            severity: warning
+            component: database
+          annotations:
+            summary: "High disk usage in {{ $labels.cluster }}"
+            description: "Database {{ $labels.datname }} is using {{ $value | humanizePercentage }} of allocated space"
+
+        # Cluster not in healthy state
+        - alert: PostgreSQLClusterNotHealthy
+          expr: |
+            cnpg_pg_replication_in_recovery{namespace="bookstore"} == 1
+          for: 10m
+          labels:
+            severity: warning
+            component: database
+          annotations:
+            summary: "PostgreSQL cluster {{ $labels.cluster }} is in recovery mode"
+            description: "Cluster has been in recovery for more than 10 minutes"
+---
+# PrometheusRule for Knative-specific alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bookstore-knative-alerts
+  namespace: bookstore
+  labels:
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: bookstore-knative
+      interval: 30s
+      rules:
+        # Cold start too slow
+        - alert: SlowColdStart
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(queue_proxy_request_duration_seconds_bucket{namespace="bookstore"}[5m])) by (le)
+            ) > 5
+          for: 10m
+          labels:
+            severity: warning
+            component: knative
+          annotations:
+            summary: "Slow cold start times detected"
+            description: "P95 cold start time is {{ $value }}s (threshold: 5s)"
+
+        # Scale-to-zero failures
+        - alert: ScaleToZeroFailures
+          expr: |
+            rate(autoscaler_desired_pods{namespace="bookstore"}[5m]) < 0
+          for: 5m
+          labels:
+            severity: warning
+            component: knative
+          annotations:
+            summary: "Scale-to-zero failures in {{ $labels.service }}"
+            description: "Service is failing to scale to zero properly"
+
+        # Revision not ready
+        - alert: KnativeRevisionNotReady
+          expr: |
+            kservice_revision_ready{namespace="bookstore"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            component: knative
+          annotations:
+            summary: "Knative revision not ready: {{ $labels.revision }}"
+            description: "Revision has been not ready for more than 5 minutes"

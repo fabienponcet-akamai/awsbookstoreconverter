@@ -1,0 +1,270 @@
+---
+# Grafana Dashboard ConfigMap - Bookstore Overview
+# This dashboard provides an overview of all Bookstore services
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-bookstore-overview
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  bookstore-overview.json: |
+    {
+      "dashboard": {
+        "title": "Bookstore - Overview",
+        "tags": ["bookstore", "knative", "overview"],
+        "timezone": "browser",
+        "schemaVersion": 16,
+        "version": 1,
+        "refresh": "30s",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Request Rate (req/s)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(rate(http_requests_total{namespace=\"bookstore\"}[5m])) by (service)",
+                "legendFormat": "{{service}}"
+              }
+            ],
+            "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8}
+          },
+          {
+            "id": 2,
+            "title": "Error Rate (%)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(rate(http_requests_total{namespace=\"bookstore\",status=~\"5..\"}[5m])) by (service) / sum(rate(http_requests_total{namespace=\"bookstore\"}[5m])) by (service) * 100",
+                "legendFormat": "{{service}}"
+              }
+            ],
+            "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8}
+          },
+          {
+            "id": 3,
+            "title": "P95 Response Time (s)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{namespace=\"bookstore\"}[5m])) by (service, le))",
+                "legendFormat": "{{service}}"
+              }
+            ],
+            "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8}
+          },
+          {
+            "id": 4,
+            "title": "Active Pods",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "count(kube_pod_status_phase{namespace=\"bookstore\",phase=\"Running\"}) by (pod)",
+                "legendFormat": "Running Pods"
+              }
+            ],
+            "gridPos": {"x": 12, "y": 8, "w": 6, "h": 4}
+          },
+          {
+            "id": 5,
+            "title": "Database Connections",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(pg_stat_activity_count{namespace=\"bookstore\"}) by (cluster)",
+                "legendFormat": "{{cluster}}"
+              }
+            ],
+            "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8}
+          },
+          {
+            "id": 6,
+            "title": "Memory Usage (MB)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(container_memory_working_set_bytes{namespace=\"bookstore\",container!=\"\"}) by (pod) / 1024 / 1024",
+                "legendFormat": "{{pod}}"
+              }
+            ],
+            "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8}
+          }
+        ]
+      }
+    }
+---
+# Grafana Dashboard ConfigMap - Knative Services
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-knative
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  knative-services.json: |
+    {
+      "dashboard": {
+        "title": "Bookstore - Knative Services",
+        "tags": ["bookstore", "knative", "serverless"],
+        "timezone": "browser",
+        "schemaVersion": 16,
+        "version": 1,
+        "refresh": "30s",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Autoscaler Desired Pods",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "autoscaler_desired_pods{namespace=\"bookstore\"}",
+                "legendFormat": "{{service}}"
+              }
+            ],
+            "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8}
+          },
+          {
+            "id": 2,
+            "title": "Actual Pods vs Desired",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "autoscaler_actual_pods{namespace=\"bookstore\"}",
+                "legendFormat": "actual - {{service}}"
+              },
+              {
+                "expr": "autoscaler_desired_pods{namespace=\"bookstore\"}",
+                "legendFormat": "desired - {{service}}"
+              }
+            ],
+            "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8}
+          },
+          {
+            "id": 3,
+            "title": "Cold Start Duration (s)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, sum(rate(queue_proxy_request_duration_seconds_bucket{namespace=\"bookstore\"}[5m])) by (le))",
+                "legendFormat": "P95"
+              },
+              {
+                "expr": "histogram_quantile(0.99, sum(rate(queue_proxy_request_duration_seconds_bucket{namespace=\"bookstore\"}[5m])) by (le))",
+                "legendFormat": "P99"
+              }
+            ],
+            "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8}
+          },
+          {
+            "id": 4,
+            "title": "Concurrent Requests",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(queue_proxy_operations_in_flight{namespace=\"bookstore\"}) by (service)",
+                "legendFormat": "{{service}}"
+              }
+            ],
+            "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8}
+          }
+        ]
+      }
+    }
+---
+# Grafana Dashboard ConfigMap - PostgreSQL
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-postgres
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  postgres-clusters.json: |
+    {
+      "dashboard": {
+        "title": "Bookstore - PostgreSQL Clusters",
+        "tags": ["bookstore", "postgresql", "database"],
+        "timezone": "browser",
+        "schemaVersion": 16,
+        "version": 1,
+        "refresh": "30s",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Database Connections",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "pg_stat_activity_count{namespace=\"bookstore\"}",
+                "legendFormat": "{{cluster}} - {{datname}}"
+              }
+            ],
+            "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8}
+          },
+          {
+            "id": 2,
+            "title": "Transaction Rate (txn/s)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(pg_stat_database_xact_commit{namespace=\"bookstore\"}[5m]) + rate(pg_stat_database_xact_rollback{namespace=\"bookstore\"}[5m])",
+                "legendFormat": "{{cluster}} - {{datname}}"
+              }
+            ],
+            "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8}
+          },
+          {
+            "id": 3,
+            "title": "Database Size (GB)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "pg_database_size_bytes{namespace=\"bookstore\"} / 1024 / 1024 / 1024",
+                "legendFormat": "{{cluster}} - {{datname}}"
+              }
+            ],
+            "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8}
+          },
+          {
+            "id": 4,
+            "title": "Replication Lag (s)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "pg_replication_lag{namespace=\"bookstore\"}",
+                "legendFormat": "{{cluster}}"
+              }
+            ],
+            "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8}
+          },
+          {
+            "id": 5,
+            "title": "Cache Hit Ratio (%)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "pg_stat_database_blks_hit{namespace=\"bookstore\"} / (pg_stat_database_blks_hit{namespace=\"bookstore\"} + pg_stat_database_blks_read{namespace=\"bookstore\"}) * 100",
+                "legendFormat": "{{cluster}} - {{datname}}"
+              }
+            ],
+            "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8}
+          },
+          {
+            "id": 6,
+            "title": "Deadlocks",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(pg_stat_database_deadlocks{namespace=\"bookstore\"}[5m])",
+                "legendFormat": "{{cluster}} - {{datname}}"
+              }
+            ],
+            "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8}
+          }
+        ]
+      }
+    }

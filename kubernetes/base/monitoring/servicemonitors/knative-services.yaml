@@ -1,0 +1,122 @@
+---
+# ServiceMonitor for all Knative services
+# Prometheus will scrape metrics from /metrics endpoint
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: bookstore-knative-services
+  namespace: bookstore
+  labels:
+    app: bookstore
+    prometheus: kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      serving.knative.dev/service: "*"
+  endpoints:
+    - port: http-metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+    - port: queue-metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+  namespaceSelector:
+    matchNames:
+      - bookstore
+---
+# ServiceMonitor for Products API
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: products-api
+  namespace: bookstore
+  labels:
+    app: bookstore
+    component: products-api
+spec:
+  selector:
+    matchLabels:
+      serving.knative.dev/service: products-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: '(http_request_duration_seconds.*|http_requests_total|nodejs_.*|process_.*)'
+          action: keep
+---
+# ServiceMonitor for Cart API
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cart-api
+  namespace: bookstore
+  labels:
+    app: bookstore
+    component: cart-api
+spec:
+  selector:
+    matchLabels:
+      serving.knative.dev/service: cart-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+# ServiceMonitor for Orders API
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: orders-api
+  namespace: bookstore
+  labels:
+    app: bookstore
+    component: orders-api
+spec:
+  selector:
+    matchLabels:
+      serving.knative.dev/service: orders-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+# ServiceMonitor for Search API
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: search-api
+  namespace: bookstore
+  labels:
+    app: bookstore
+    component: search-api
+spec:
+  selector:
+    matchLabels:
+      serving.knative.dev/service: search-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+# ServiceMonitor for Recommendations API
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: recommendations-api
+  namespace: bookstore
+  labels:
+    app: bookstore
+    component: recommendations-api
+spec:
+  selector:
+    matchLabels:
+      serving.knative.dev/service: recommendations-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

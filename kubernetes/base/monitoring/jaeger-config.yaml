@@ -1,0 +1,209 @@
+---
+# Jaeger Operator configuration for distributed tracing
+# Note: Requires Jaeger Operator to be installed (via APL Core)
+apiVersion: jaegertracing.io/v1
+kind: Jaeger
+metadata:
+  name: bookstore-jaeger
+  namespace: monitoring
+spec:
+  strategy: production
+  storage:
+    type: elasticsearch
+    options:
+      es:
+        server-urls: http://elasticsearch:9200
+        index-prefix: jaeger
+    # Alternative: Use memory storage for testing
+    # type: memory
+    # options:
+    #   memory:
+    #     max-traces: 10000
+
+  query:
+    replicas: 2
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  collector:
+    replicas: 2
+    maxReplicas: 5
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    options:
+      log-level: info
+      collector.zipkin.http-port: 9411
+
+  agent:
+    strategy: DaemonSet
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+  ingress:
+    enabled: false
+    # Enable if you want external access to Jaeger UI
+    # annotations:
+    #   kubernetes.io/ingress.class: istio
+    # hosts:
+    #   - jaeger.bookstore.example.com
+---
+# OpenTelemetry Collector configuration
+# Collects traces from Knative services and sends to Jaeger
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: bookstore
+data:
+  otel-collector-config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+      zipkin:
+        endpoint: 0.0.0.0:9411
+      jaeger:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:14250
+          thrift_http:
+            endpoint: 0.0.0.0:14268
+
+    processors:
+      batch:
+        timeout: 10s
+        send_batch_size: 1024
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 512
+      resource:
+        attributes:
+          - key: service.namespace
+            value: bookstore
+            action: upsert
+
+    exporters:
+      jaeger:
+        endpoint: bookstore-jaeger-collector.monitoring.svc.cluster.local:14250
+        tls:
+          insecure: true
+      logging:
+        loglevel: info
+      prometheus:
+        endpoint: "0.0.0.0:8889"
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+      pprof:
+        endpoint: 0.0.0.0:1777
+      zpages:
+        endpoint: 0.0.0.0:55679
+
+    service:
+      extensions: [health_check, pprof, zpages]
+      pipelines:
+        traces:
+          receivers: [otlp, zipkin, jaeger]
+          processors: [memory_limiter, batch, resource]
+          exporters: [jaeger, logging]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [prometheus, logging]
+---
+# OpenTelemetry Collector Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: bookstore
+  labels:
+    app: otel-collector
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.91.0
+          args:
+            - --config=/conf/otel-collector-config.yaml
+          ports:
+            - containerPort: 4317  # OTLP gRPC
+            - containerPort: 4318  # OTLP HTTP
+            - containerPort: 9411  # Zipkin
+            - containerPort: 14250 # Jaeger gRPC
+            - containerPort: 14268 # Jaeger HTTP
+            - containerPort: 8889  # Prometheus metrics
+            - containerPort: 13133 # Health check
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+# OpenTelemetry Collector Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: bookstore
+  labels:
+    app: otel-collector
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+    - name: zipkin
+      port: 9411
+      targetPort: 9411
+    - name: jaeger-grpc
+      port: 14250
+      targetPort: 14250
+    - name: jaeger-http
+      port: 14268
+      targetPort: 14268
+    - name: metrics
+      port: 8889
+      targetPort: 8889
+  type: ClusterIP
