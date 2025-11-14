@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookstore-api
+  namespace: bookstore
+  labels:
+    app: bookstore-api
+    component: backend
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: bookstore-api
+  template:
+    metadata:
+      labels:
+        app: bookstore-api
+        component: backend
+        version: v1
+    spec:
+      containers:
+      - name: api
+        image: bookstore-api:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+          name: http
+          protocol: TCP
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "3000"
+        - name: API_VERSION
+          value: "v1"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: bookstore-api-secrets
+              key: database-url
+        - name: REDIS_HOST
+          value: "redis.bookstore.svc.cluster.local"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-credentials
+              key: password
+        - name: ELASTICSEARCH_NODE
+          value: "http://elasticsearch.bookstore.svc.cluster.local:9200"
+        - name: KEYCLOAK_URL
+          value: "http://keycloak.bookstore.svc.cluster.local:8080"
+        - name: KEYCLOAK_REALM
+          value: "bookstore"
+        - name: KEYCLOAK_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: bookstore-api-secrets
+              key: keycloak-client-id
+        - name: KEYCLOAK_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: bookstore-api-secrets
+              key: keycloak-client-secret
+        - name: LOG_LEVEL
+          value: "info"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bookstore-api
+  namespace: bookstore
+  labels:
+    app: bookstore-api
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 3000
+    protocol: TCP
+    name: http
+  selector:
+    app: bookstore-api
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: bookstore-api-secrets
+  namespace: bookstore
+type: Opaque
+stringData:
+  database-url: "postgresql://bookstore:changeme@bookstore-postgres-rw.bookstore.svc.cluster.local:5432/bookstore"
+  keycloak-client-id: "bookstore-api"
+  keycloak-client-secret: "changeme-client-secret"
+  jwt-secret: "changeme-jwt-secret"
