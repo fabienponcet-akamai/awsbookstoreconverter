@@ -4,9 +4,10 @@ kind: Kustomization
 namespace: bookstore
 
 resources:
-  - postgres-cluster.yaml
-  - redis.yaml
-  - elasticsearch.yaml
+  - postgres-cluster.yaml    # Main database (products, cart, orders, users)
+  - postgres-search.yaml     # Search database (replaces Elasticsearch)
+  - postgres-graph.yaml      # Graph database (replaces Neptune)
+  - redis.yaml               # Cache and leaderboard
 
 commonLabels:
   app.kubernetes.io/part-of: bookstore

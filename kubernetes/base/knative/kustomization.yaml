@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: bookstore
+
+resources:
+  - products-service.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: bookstore
+  app.kubernetes.io/component: knative-api
+  app.kubernetes.io/managed-by: kustomize

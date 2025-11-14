@@ -1,46 +1,57 @@
 // Prisma schema for Bookstore database
-// Migrated from DynamoDB to PostgreSQL
+// Cloud-Native Architecture with CloudNative-PG
+// Uses PostgreSQL extensions: pg_trgm, ts_vector, Apache AGE
 
 generator client {
   provider = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
 }
 
+// Main database - transactional data
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
+// Note: For multi-database support (search, graph), we'll use separate connections
+// Search DB: env("SEARCH_DATABASE_URL") - for full-text search
+// Graph DB: env("GRAPH_DATABASE_URL") - for Apache AGE graph queries
+
+// ==============================================================================
+// MAIN DATABASE - Transactional Data
+// ==============================================================================
+
 // Users (managed by Keycloak, but we store additional info)
 model User {
-  id        String   @id @default(uuid())
-  keycloakId String  @unique
-  email     String   @unique
-  firstName String?
-  lastName  String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         String   @id @default(uuid())
+  keycloakId String   @unique
+  email      String   @unique
+  firstName  String?
+  lastName   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
-  cart      Cart?
-  orders    Order[]
+  cart       Cart?
+  orders     Order[]
 
   @@map("users")
 }
 
 // Products (books)
 model Product {
-  id          String   @id @default(uuid())
-  isbn        String?  @unique
+  id          String    @id @default(uuid())
+  isbn        String?   @unique
   title       String
   author      String
   category    String
   description String?
-  price       Decimal  @db.Decimal(10, 2)
-  stock       Int      @default(0)
+  price       Decimal   @db.Decimal(10, 2)
+  stock       Int       @default(0)
   imageUrl    String?
   publisher   String?
   publishedAt DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   cartItems   CartItem[]
   orderItems  OrderItem[]
@@ -95,6 +106,7 @@ model Order {
 
   @@index([userId])
   @@index([status])
+  @@index([createdAt])
   @@map("orders")
 }
 
@@ -119,3 +131,73 @@ enum OrderStatus {
   DELIVERED
   CANCELLED
 }
+
+// ==============================================================================
+// SEARCH DATABASE - Full-text Search (separate database)
+// ==============================================================================
+// This uses PostgreSQL extensions: pg_trgm, fuzzystrmatch, unaccent
+// Connected via SEARCH_DATABASE_URL
+
+// ProductSearch mirrors products but optimized for search
+// Note: This would be in a separate Prisma schema or managed via raw SQL
+// For now, documented for reference
+
+/*
+CREATE TABLE product_search (
+  id UUID PRIMARY KEY,
+  title TEXT NOT NULL,
+  author TEXT NOT NULL,
+  description TEXT,
+  category TEXT,
+  search_vector tsvector GENERATED ALWAYS AS (
+    to_tsvector('english',
+      coalesce(title, '') || ' ' ||
+      coalesce(author, '') || ' ' ||
+      coalesce(description, '')
+    )
+  ) STORED
+);
+
+CREATE INDEX idx_product_search_fts ON product_search USING GIN (search_vector);
+CREATE INDEX idx_product_search_trigram ON product_search USING GIN (title gin_trgm_ops);
+CREATE INDEX idx_product_search_author_trigram ON product_search USING GIN (author gin_trgm_ops);
+
+-- Sync trigger from main DB to search DB
+-- This would be handled by application logic or database triggers
+*/
+
+// ==============================================================================
+// GRAPH DATABASE - Apache AGE (separate database)
+// ==============================================================================
+// This uses Apache AGE extension for graph queries
+// Connected via GRAPH_DATABASE_URL
+
+/*
+Apache AGE Graph Schema (created via Cypher):
+
+Vertex Labels:
+- User: { id: UUID, keycloakId: String, name: String }
+- Book: { id: UUID, isbn: String, title: String, author: String }
+
+Edge Labels:
+- PURCHASED: { userId: UUID, bookId: UUID, date: Timestamp, price: Decimal }
+- RATED: { userId: UUID, bookId: UUID, rating: Int, review: String }
+- FRIENDS_WITH: { userId1: UUID, userId2: UUID, since: Timestamp }
+
+Example Cypher queries:
+
+-- Get book recommendations based on similar users
+MATCH (user:User {id: 'user123'})-[:PURCHASED]->(book:Book)
+      <-[:PURCHASED]-(other:User)-[:PURCHASED]->(rec:Book)
+WHERE NOT (user)-[:PURCHASED]->(rec)
+RETURN rec.title, rec.isbn, COUNT(other) as score
+ORDER BY score DESC
+LIMIT 10;
+
+-- Find friends who bought similar books
+MATCH (user:User {id: 'user123'})-[:FRIENDS_WITH]-(friend:User)
+      -[:PURCHASED]->(book:Book)
+WHERE NOT (user)-[:PURCHASED]->(book)
+RETURN friend.name, book.title, book.isbn
+ORDER BY friend.name;
+*/

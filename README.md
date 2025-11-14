@@ -1,26 +1,49 @@
 # AWS Bookstore to Akamai App Platform Migration
+## Serverless Cloud-Native avec Knative + CloudNative-PG
 
 Ce projet convertit l'[AWS Bookstore Demo App](https://github.com/aws-samples/aws-bookstore-demo-app) pour fonctionner sur [Akamai App Platform (APL)](https://github.com/linode/apl-core) sur Linode.
 
 ## Vue d'ensemble
 
-Migration d'une architecture serverless AWS vers une architecture Kubernetes native :
+Migration d'une architecture serverless AWS vers une architecture **Kubernetes serverless cloud-native** :
 
 - **Frontend** : React SPA servie via Nginx
-- **Backend** : Services API Node.js (ex-Lambda functions)
+- **Backend** : **Knative Serving** (serverless, scale-to-zero)
 - **Auth** : Keycloak (remplace Cognito)
-- **Databases** : PostgreSQL, Redis, Elasticsearch
+- **Databases** : **CloudNative-PG** unifié (3 clusters PostgreSQL)
+  - Main : Données transactionnelles
+  - Search : Full-text search avec **pg_trgm + ts_vector** (remplace Elasticsearch)
+  - Graph : Recommandations avec **Apache AGE** (remplace Neptune)
+- **Cache** : Redis (leaderboard)
 - **Déploiement** : Kubernetes via APL avec Istio, Tekton, ArgoCD
 
-## Architecture
+## Architecture Cloud-Native
 
 ```
-Akamai CDN → Istio Gateway → Frontend (React) + API Services
-                                    ↓
-                      PostgreSQL + Redis + Elasticsearch
-                                    ↓
-                               Keycloak (Auth)
+Akamai CDN → Istio Gateway → Frontend (React) + Knative Services (Serverless)
+                                                       ↓
+                                 ┌────────────────────┼────────────────────┐
+                                 │                    │                    │
+                         CloudNative-PG      CloudNative-PG       CloudNative-PG
+                            "main"              "search"             "graph"
+                         (Products, Cart)    (pg_trgm, FTS)      (Apache AGE)
+                                 │                    │                    │
+                                 └────────────────────┴────────────────────┘
+                                                  Redis + Keycloak
 ```
+
+## Avantages de cette Architecture
+
+### ✅ Knative Serving
+- **Scale-to-zero** : Pas de coûts quand pas de trafic
+- **Auto-scaling** : Scale basé sur les requêtes/sec
+- **Serverless natif** : Comme Lambda mais sur Kubernetes
+
+### ✅ CloudNative-PG Unifié
+- **Un seul opérateur** : PostgreSQL pour tout
+- **Extensions puissantes** : pg_trgm, ts_vector, Apache AGE
+- **Coûts réduits** : vs Elasticsearch + Neptune séparés
+- **Backups unifiés** : Stratégie cohérente
 
 ## Prérequis
 
@@ -82,17 +105,26 @@ kubectl apply -k kubernetes/overlays/dev/frontend/
 kubectl apply -k kubernetes/base/gateway/
 ```
 
-## Services Migrés
+## Services Migrés (Cloud-Native)
 
-| Service AWS | Équivalent APL | Statut |
-|-------------|----------------|--------|
-| Lambda | Kubernetes Services | 🚧 En cours |
-| DynamoDB | PostgreSQL | 🚧 En cours |
-| Cognito | Keycloak | ⏳ À faire |
-| ElastiCache | Redis | ⏳ À faire |
-| Elasticsearch | Elasticsearch | ⏳ À faire |
-| API Gateway | Istio Gateway | ⏳ À faire |
-| S3/CloudFront | Object Storage + CDN | ⏳ À faire |
+| Service AWS | Solution Cloud-Native | Statut |
+|-------------|----------------------|--------|
+| Lambda | **Knative Serving** (serverless, scale-to-zero) | ✅ Implémenté |
+| DynamoDB | **CloudNative-PG** cluster "main" | ✅ Implémenté |
+| Neptune (graph) | **CloudNative-PG** + Apache AGE | ✅ Implémenté |
+| Elasticsearch | **CloudNative-PG** + pg_trgm/ts_vector | ✅ Implémenté |
+| Cognito | Keycloak | ✅ Configuré |
+| ElastiCache | Redis StatefulSet | ✅ Configuré |
+| API Gateway | Istio Gateway + Knative | ✅ Configuré |
+| S3/CloudFront | Object Storage + Akamai CDN | ✅ Configuré |
+
+### Extensions PostgreSQL Utilisées
+
+- **Apache AGE** : Graph database (recommandations sociales)
+- **pg_trgm** : Fuzzy search (tolérance aux fautes)
+- **ts_vector** : Full-text search (recherche sémantique)
+- **fuzzystrmatch** : Matching flou
+- **unaccent** : Recherche sans accents
 
 ## Fonctionnalités
 

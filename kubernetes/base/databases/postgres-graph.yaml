@@ -1,0 +1,156 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: bookstore-graph
+  namespace: bookstore
+  labels:
+    app: bookstore
+    database-type: graph
+spec:
+  instances: 2
+
+  # PostgreSQL configuration for graph database
+  postgresql:
+    parameters:
+      max_connections: "100"
+      shared_buffers: "512MB"
+      effective_cache_size: "1536MB"
+      maintenance_work_mem: "128MB"
+      checkpoint_completion_target: "0.9"
+      wal_buffers: "16MB"
+      default_statistics_target: "100"
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+      work_mem: "6553kB"
+      min_wal_size: "1GB"
+      max_wal_size: "4GB"
+      # Optimizations for graph queries
+      join_collapse_limit: "1"
+      from_collapse_limit: "1"
+    pg_hba:
+      - host all all all scram-sha-256
+
+  # ImageName with Apache AGE extension
+  # Note: You'll need to build a custom PostgreSQL image with AGE extension
+  # or use a pre-built image that includes it
+  imageName: postgres:15
+
+  # Bootstrap configuration
+  bootstrap:
+    initdb:
+      database: bookstore_graph
+      owner: bookstore
+      secret:
+        name: bookstore-graph-credentials
+      postInitApplicationSQL:
+        - |
+          -- Apache AGE extension installation
+          -- Note: This requires the AGE extension to be pre-installed in the image
+          CREATE EXTENSION IF NOT EXISTS age;
+
+          -- Load AGE into the search path
+          SET search_path = ag_catalog, "$user", public;
+
+          -- Create the social network graph
+          SELECT create_graph('social_network');
+
+          -- Create indexes for better performance
+          CREATE INDEX IF NOT EXISTS idx_ag_label_vertex_label_id
+            ON ag_catalog.ag_label (label, id);
+
+  # Storage configuration
+  storage:
+    size: 10Gi
+    storageClass: linode-block-storage-retain
+
+  # Backup configuration
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://bookstore-backups/postgres-graph
+      s3Credentials:
+        accessKeyId:
+          name: linode-object-storage-credentials
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: linode-object-storage-credentials
+          key: SECRET_ACCESS_KEY
+      endpointURL: https://us-east-1.linodeobjects.com
+      wal:
+        compression: gzip
+    retentionPolicy: "30d"
+
+  # Monitoring
+  monitoring:
+    enablePodMonitor: true
+
+  # Resources
+  resources:
+    requests:
+      memory: "768Mi"
+      cpu: "500m"
+    limits:
+      memory: "1536Mi"
+      cpu: "1000m"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: bookstore-graph-credentials
+  namespace: bookstore
+type: kubernetes.io/basic-auth
+stringData:
+  username: bookstore
+  password: changeme-graph-password
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bookstore-graph-init
+  namespace: bookstore
+data:
+  init-graph.sql: |
+    -- Apache AGE Graph Database Initialization
+
+    -- Load AGE extension
+    LOAD 'age';
+    SET search_path = ag_catalog, "$user", public;
+
+    -- Create the social network graph if not exists
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM ag_catalog.ag_graph WHERE name = 'social_network'
+      ) THEN
+        PERFORM create_graph('social_network');
+      END IF;
+    END
+    $$;
+
+    -- Create vertex labels
+    SELECT * FROM cypher('social_network', $$
+      CREATE VLABEL IF NOT EXISTS User
+    $$) as (v agtype);
+
+    SELECT * FROM cypher('social_network', $$
+      CREATE VLABEL IF NOT EXISTS Book
+    $$) as (v agtype);
+
+    -- Create edge labels
+    SELECT * FROM cypher('social_network', $$
+      CREATE ELABEL IF NOT EXISTS PURCHASED
+    $$) as (e agtype);
+
+    SELECT * FROM cypher('social_network', $$
+      CREATE ELABEL IF NOT EXISTS FRIENDS_WITH
+    $$) as (e agtype);
+
+    SELECT * FROM cypher('social_network', $$
+      CREATE ELABEL IF NOT EXISTS RATED
+    $$) as (e agtype);
+
+    -- Create indexes for performance
+    CREATE INDEX IF NOT EXISTS idx_user_id ON ag_catalog._ag_label_vertex(properties)
+      WHERE label = (SELECT id FROM ag_catalog.ag_label WHERE name = 'User');
+
+    CREATE INDEX IF NOT EXISTS idx_book_isbn ON ag_catalog._ag_label_vertex(properties)
+      WHERE label = (SELECT id FROM ag_catalog.ag_label WHERE name = 'Book');
