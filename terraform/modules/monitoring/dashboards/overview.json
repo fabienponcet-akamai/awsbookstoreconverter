@@ -1,0 +1,57 @@
+{
+  "dashboard": {
+    "title": "Bookstore - Overview",
+    "tags": ["bookstore", "overview"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Request Rate (req/s)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total{namespace=\"bookstore\"}[5m])) by (service)",
+            "legendFormat": "{{ service }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Error Rate (%)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total{namespace=\"bookstore\",status=~\"5..\"}[5m])) by (service) / sum(rate(http_requests_total{namespace=\"bookstore\"}[5m])) by (service) * 100",
+            "legendFormat": "{{ service }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "P95 Latency (ms)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{namespace=\"bookstore\"}[5m])) by (le, service)) * 1000",
+            "legendFormat": "{{ service }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Active Pods",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(kube_deployment_status_replicas_available{namespace=\"bookstore\"}) by (deployment)",
+            "legendFormat": "{{ deployment }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      }
+    ]
+  }
+}

@@ -1,0 +1,265 @@
+# ============================================================================
+# Bookstore Terraform Configuration Example
+# Copy this file to terraform.tfvars and customize with your values
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Required Variables
+# ----------------------------------------------------------------------------
+
+# Linode API Token (REQUIRED)
+# Get from: https://cloud.linode.com/profile/tokens
+linode_token = "YOUR_LINODE_API_TOKEN_HERE"
+
+# Linode Region (REQUIRED)
+# Options: us-east, us-west, eu-west, eu-central, ap-south, ap-northeast, etc.
+# See: https://api.linode.com/v4/regions
+region = "us-east"
+
+# Domain Name (REQUIRED for TLS)
+# Your domain for the bookstore application
+domain_name = "bookstore.yourdomain.com"
+
+# Container Registry (REQUIRED)
+# Where your Docker images are stored
+# Examples:
+#   - "docker.io/yourusername"
+#   - "ghcr.io/yourorg"
+#   - "us-east-1.linodeobjects.com/yourregistry"
+container_registry = "docker.io/yourusername"
+
+# ----------------------------------------------------------------------------
+# Environment Configuration
+# ----------------------------------------------------------------------------
+
+# Environment Name
+# Options: dev, staging, production
+environment = "production"
+
+# Project Name
+# Used for resource naming
+project_name = "bookstore"
+
+# ----------------------------------------------------------------------------
+# Kubernetes Configuration
+# ----------------------------------------------------------------------------
+
+# Kubernetes Version
+# Check available versions: linode-cli lke versions-list
+kubernetes_version = "1.28"
+
+# Node Pools Configuration
+# Each pool defines: type (Linode plan) and count (number of nodes)
+#
+# Common Linode plans:
+#   - g6-standard-1: 1 vCPU, 2GB RAM    (~$12/mo)
+#   - g6-standard-2: 2 vCPU, 4GB RAM    (~$24/mo)
+#   - g6-standard-4: 4 vCPU, 8GB RAM    (~$48/mo)
+#   - g6-standard-6: 6 vCPU, 16GB RAM   (~$96/mo)
+#   - g6-standard-8: 8 vCPU, 32GB RAM   (~$192/mo)
+#
+# Production (recommended):
+node_pools = [
+  { type = "g6-standard-4", count = 3 },
+  { type = "g6-standard-8", count = 2 }
+]
+
+# Development (minimal):
+# node_pools = [
+#   { type = "g6-standard-2", count = 2 }
+# ]
+
+# Staging (moderate):
+# node_pools = [
+#   { type = "g6-standard-4", count = 2 }
+# ]
+
+# ----------------------------------------------------------------------------
+# Database Configuration
+# ----------------------------------------------------------------------------
+
+# PostgreSQL Replicas
+# Number of replicas for each database cluster
+# Minimum: 1, Recommended: 3 for high availability
+postgres_replicas = 3
+
+# Main Database Configuration
+main_db_storage  = "50Gi"   # Storage size for transactional database
+main_db_replicas = 3        # Number of replicas
+
+# Search Database Configuration
+search_db_storage  = "30Gi" # Storage size for search database
+search_db_replicas = 2      # Number of replicas
+
+# Graph Database Configuration
+graph_db_storage  = "30Gi"  # Storage size for graph database
+graph_db_replicas = 2       # Number of replicas
+
+# ----------------------------------------------------------------------------
+# APL Core Configuration
+# ----------------------------------------------------------------------------
+
+# APL Core Repository
+# Official Akamai App Platform Core Helm charts
+apl_core_repo    = "https://github.com/linode/apl-core"
+apl_core_version = "main"
+
+# ----------------------------------------------------------------------------
+# Security & Authentication
+# ----------------------------------------------------------------------------
+
+# Grafana Admin Password (REQUIRED)
+# Used for Grafana dashboard access
+grafana_password = "CHANGE_ME_STRONG_PASSWORD"
+
+# Keycloak Admin Password (REQUIRED)
+# Used for Keycloak authentication
+keycloak_password = "CHANGE_ME_STRONG_PASSWORD"
+
+# Enable TLS Certificates
+# Requires domain_name to be set and DNS configured
+enable_tls = true
+
+# ----------------------------------------------------------------------------
+# Monitoring Configuration
+# ----------------------------------------------------------------------------
+
+# Install Monitoring Stack (Prometheus + Grafana + Loki)
+install_monitoring = true
+
+# Install Tracing Stack (Jaeger + OpenTelemetry)
+install_tracing = true
+
+# ----------------------------------------------------------------------------
+# Frontend Configuration
+# ----------------------------------------------------------------------------
+
+# Object Storage Cluster
+# Region for frontend object storage bucket
+# Should match or be close to your region
+frontend_bucket_cluster = "us-east-1"
+
+# ----------------------------------------------------------------------------
+# Knative Scaling Configuration (Optional)
+# ----------------------------------------------------------------------------
+
+# Products Service Scaling
+products_min_scale = 0   # Scale to zero when idle
+products_max_scale = 10  # Maximum replicas
+
+# Cart Service Scaling
+cart_min_scale = 0
+cart_max_scale = 10
+
+# Orders Service Scaling (critical service)
+orders_min_scale = 0
+orders_max_scale = 15
+
+# Search Service Scaling (keep alive for fast response)
+search_min_scale = 1     # Always at least 1 replica
+search_max_scale = 20
+
+# Recommendations Service Scaling
+recommendations_min_scale = 0
+recommendations_max_scale = 10
+
+# ----------------------------------------------------------------------------
+# Backup Configuration
+# ----------------------------------------------------------------------------
+
+# Backup Retention Period
+# How long to keep database backups (in days)
+backup_retention_days = 30
+
+# Backup Schedule (cron format)
+# Default: Every 6 hours
+backup_schedule = "0 */6 * * *"
+
+# ----------------------------------------------------------------------------
+# Tags (Optional)
+# ----------------------------------------------------------------------------
+
+# Resource Tags
+# Applied to all Linode resources for organization
+tags = {
+  Environment = "production"
+  Project     = "bookstore"
+  ManagedBy   = "terraform"
+  Owner       = "platform-team"
+}
+
+# ----------------------------------------------------------------------------
+# Advanced Configuration (Optional)
+# ----------------------------------------------------------------------------
+
+# Custom Namespace
+# Default: bookstore
+# namespace = "bookstore"
+
+# Container Image Tag
+# Default: latest
+# image_tag = "v1.0.0"
+
+# Enable Node Auto-scaling
+# Default: true
+# enable_autoscaling = true
+
+# Node Auto-scaling Min/Max
+# node_autoscale_min = 2
+# node_autoscale_max = 10
+
+# Storage Class
+# Default: linode-block-storage-retain
+# storage_class = "linode-block-storage-retain"
+
+# ============================================================================
+# Example Configurations by Environment
+# ============================================================================
+
+# --- DEVELOPMENT ---
+# Small, cost-effective setup for development
+#
+# environment         = "dev"
+# node_pools          = [{ type = "g6-standard-2", count = 2 }]
+# postgres_replicas   = 1
+# main_db_storage     = "20Gi"
+# search_db_storage   = "10Gi"
+# graph_db_storage    = "10Gi"
+# install_monitoring  = false
+# install_tracing     = false
+# enable_tls          = false
+#
+# Estimated cost: ~$50/month
+
+# --- STAGING ---
+# Moderate setup for staging/testing
+#
+# environment         = "staging"
+# node_pools          = [{ type = "g6-standard-4", count = 2 }]
+# postgres_replicas   = 2
+# main_db_storage     = "30Gi"
+# search_db_storage   = "20Gi"
+# graph_db_storage    = "20Gi"
+# install_monitoring  = true
+# install_tracing     = false
+# enable_tls          = true
+#
+# Estimated cost: ~$100/month
+
+# --- PRODUCTION ---
+# Full production setup with high availability
+#
+# environment         = "production"
+# node_pools          = [
+#   { type = "g6-standard-4", count = 3 },
+#   { type = "g6-standard-8", count = 2 }
+# ]
+# postgres_replicas   = 3
+# main_db_storage     = "100Gi"
+# search_db_storage   = "50Gi"
+# graph_db_storage    = "50Gi"
+# install_monitoring  = true
+# install_tracing     = true
+# enable_tls          = true
+#
+# Estimated cost: ~$300-350/month

@@ -1,0 +1,57 @@
+{
+  "dashboard": {
+    "title": "Bookstore - Knative Services",
+    "tags": ["bookstore", "knative"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Knative Service Replicas",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(kube_deployment_status_replicas_available{namespace=\"bookstore\"}) by (deployment)",
+            "legendFormat": "{{ deployment }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Cold Start Duration (s)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(queue_request_duration_seconds_bucket{namespace=\"bookstore\"}[5m])) by (le, service))",
+            "legendFormat": "P95 - {{ service }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Concurrent Requests",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(queue_requests_per_second{namespace=\"bookstore\"}) by (service)",
+            "legendFormat": "{{ service }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Scale to Zero Events",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(increase(activator_go_routines{namespace=\"knative-serving\"}[5m]))",
+            "legendFormat": "Activations"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      }
+    ]
+  }
+}
