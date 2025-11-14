@@ -10,11 +10,10 @@ Migration d'une architecture serverless AWS vers une architecture **Kubernetes s
 - **Frontend** : React SPA servie via Nginx
 - **Backend** : **Knative Serving** (serverless, scale-to-zero)
 - **Auth** : Keycloak (remplace Cognito)
-- **Databases** : **CloudNative-PG** unifié (3 clusters PostgreSQL)
-  - Main : Données transactionnelles
+- **Databases** : **CloudNative-PG** 100% unifié (3 clusters PostgreSQL - TOUT !)
+  - Main : Données transactionnelles + **Cache** + **Leaderboard** (remplace Redis aussi!)
   - Search : Full-text search avec **pg_trgm + ts_vector** (remplace Elasticsearch)
   - Graph : Recommandations avec **Apache AGE** (remplace Neptune)
-- **Cache** : Redis (leaderboard)
 - **Déploiement** : Kubernetes via APL avec Istio, Tekton, ArgoCD
 
 ## Architecture Cloud-Native
@@ -26,10 +25,18 @@ Akamai CDN → Istio Gateway → Frontend (React) + Knative Services (Serverless
                                  │                    │                    │
                          CloudNative-PG      CloudNative-PG       CloudNative-PG
                             "main"              "search"             "graph"
-                         (Products, Cart)    (pg_trgm, FTS)      (Apache AGE)
+                         ━━━━━━━━━━━━        ━━━━━━━━━━━━        ━━━━━━━━━━━━
+                         • Products           • Full-text         • Apache AGE
+                         • Cart               • pg_trgm           • Graph DB
+                         • Orders             • ts_vector         • Cypher
+                         • Users              • Fuzzy search      • Recommendations
+                         • Cache (!)
+                         • Leaderboard (!)
                                  │                    │                    │
                                  └────────────────────┴────────────────────┘
-                                                  Redis + Keycloak
+                                            Keycloak (Auth)
+
+                          🎉 Redis supprimé - TOUT dans PostgreSQL ! 🎉
 ```
 
 ## Avantages de cette Architecture
@@ -39,11 +46,12 @@ Akamai CDN → Istio Gateway → Frontend (React) + Knative Services (Serverless
 - **Auto-scaling** : Scale basé sur les requêtes/sec
 - **Serverless natif** : Comme Lambda mais sur Kubernetes
 
-### ✅ CloudNative-PG Unifié
-- **Un seul opérateur** : PostgreSQL pour tout
-- **Extensions puissantes** : pg_trgm, ts_vector, Apache AGE
-- **Coûts réduits** : vs Elasticsearch + Neptune séparés
+### ✅ CloudNative-PG 100% Unifié - TOUT dans PostgreSQL !
+- **Un seul opérateur** : PostgreSQL pour TOUT (données, cache, search, graph)
+- **Extensions + fonctionnalités natives** : pg_trgm, ts_vector, Apache AGE, JSONB
+- **Coûts réduits** : vs Elasticsearch + Neptune + Redis séparés
 - **Backups unifiés** : Stratégie cohérente
+- **Pas de Redis !** : Cache et leaderboard aussi dans PostgreSQL
 
 ## Prérequis
 
@@ -111,20 +119,27 @@ kubectl apply -k kubernetes/base/gateway/
 |-------------|----------------------|--------|
 | Lambda | **Knative Serving** (serverless, scale-to-zero) | ✅ Implémenté |
 | DynamoDB | **CloudNative-PG** cluster "main" | ✅ Implémenté |
-| Neptune (graph) | **CloudNative-PG** + Apache AGE | ✅ Implémenté |
-| Elasticsearch | **CloudNative-PG** + pg_trgm/ts_vector | ✅ Implémenté |
+| Neptune (graph) | **CloudNative-PG** + Apache AGE (cluster "graph") | ✅ Implémenté |
+| Elasticsearch | **CloudNative-PG** + pg_trgm/ts_vector (cluster "search") | ✅ Implémenté |
+| ElastiCache (Redis) | **PostgreSQL** cache + leaderboard tables | ✅ Implémenté |
 | Cognito | Keycloak | ✅ Configuré |
-| ElastiCache | Redis StatefulSet | ✅ Configuré |
 | API Gateway | Istio Gateway + Knative | ✅ Configuré |
 | S3/CloudFront | Object Storage + Akamai CDN | ✅ Configuré |
 
-### Extensions PostgreSQL Utilisées
+### PostgreSQL - Tout-en-un ! 🚀
 
+**Extensions utilisées** :
 - **Apache AGE** : Graph database (recommandations sociales)
 - **pg_trgm** : Fuzzy search (tolérance aux fautes)
 - **ts_vector** : Full-text search (recherche sémantique)
 - **fuzzystrmatch** : Matching flou
 - **unaccent** : Recherche sans accents
+
+**Fonctionnalités natives PostgreSQL** :
+- **JSONB** : Cache avec TTL (remplace Redis cache)
+- **Tables + INDEX** : Leaderboard avec ORDER BY (remplace Redis sorted sets)
+- **Triggers** : Nettoyage automatique du cache expiré
+- **pg_cron** : Maintenance programmée (optionnel)
 
 ## Fonctionnalités
 

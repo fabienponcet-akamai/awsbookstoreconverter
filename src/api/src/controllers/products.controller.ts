@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { AppError } from '../middleware/errorHandler';
 import { createLogger } from '../utils/logger';
+import { leaderboardService } from '../services/leaderboard.service';
+import { cacheService } from '../services/cache.service';
 
 const logger = createLogger('ProductsController');
 
@@ -82,21 +84,27 @@ export class ProductsController {
   }
 
   /**
-   * Get bestseller products from Redis leaderboard
+   * Get bestseller products from PostgreSQL leaderboard
    */
   async getBestsellers(req: Request, res: Response, next: NextFunction) {
     try {
       const limit = parseInt(req.query.limit as string) || 20;
 
-      // TODO: Implement with Redis
-      // const bestsellers = await redisClient.zrevrange('bestsellers', 0, limit - 1);
+      logger.info(`Fetching top ${limit} bestsellers from PostgreSQL leaderboard`);
 
-      logger.info(`Fetching top ${limit} bestsellers`);
+      // Use cache wrapper to avoid hitting DB every time
+      const bestsellers = await cacheService.wrap(
+        `bestsellers:${limit}`,
+        () => leaderboardService.getTop(limit),
+        300 // Cache for 5 minutes
+      );
 
       res.json({
-        data: []
+        data: bestsellers,
+        count: bestsellers.length
       });
     } catch (error) {
+      logger.error('Error fetching bestsellers:', error);
       next(error);
     }
   }
