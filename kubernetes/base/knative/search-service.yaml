@@ -1,0 +1,82 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: search-api
+  namespace: bookstore
+  labels:
+    app: bookstore
+    component: search-api
+spec:
+  template:
+    metadata:
+      annotations:
+        # Auto-scaling configuration
+        autoscaling.knative.dev/min-scale: "1"  # Keep 1 pod for fast search
+        autoscaling.knative.dev/max-scale: "20"  # High scale for search spikes
+        autoscaling.knative.dev/target: "150"   # Higher concurrency for read-heavy search
+        autoscaling.knative.dev/metric: "concurrency"
+        # Timeout
+        autoscaling.knative.dev/scale-down-delay: "120s"  # Keep search pods longer
+      labels:
+        app: bookstore
+        component: search-api
+        version: v1
+    spec:
+      containerConcurrency: 150
+      containers:
+      - name: search-api
+        image: ${CONTAINER_REGISTRY}/bookstore-api:${IMAGE_TAG}
+        ports:
+        - containerPort: 3000
+          protocol: TCP
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "3000"
+        - name: SERVICE_NAME
+          value: "search"
+        - name: SEARCH_DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: bookstore-api-secrets
+              key: database-url-search
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: bookstore-api-secrets
+              key: database-url-main
+        - name: KEYCLOAK_URL
+          value: "http://keycloak.bookstore.svc.cluster.local:8080"
+        - name: KEYCLOAK_REALM
+          value: "bookstore"
+        - name: KEYCLOAK_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: bookstore-api-secrets
+              key: keycloak-client-id
+        - name: KEYCLOAK_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: bookstore-api-secrets
+              key: keycloak-client-secret
+        resources:
+          requests:
+            memory: "384Mi"
+            cpu: "250m"
+          limits:
+            memory: "768Mi"
+            cpu: "750m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      timeoutSeconds: 300

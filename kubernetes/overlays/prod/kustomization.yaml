@@ -1,0 +1,39 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: bookstore
+
+bases:
+  - ../../base/databases
+  - ../../base/knative
+  - ../../base/gateway
+
+# Environment-specific labels
+commonLabels:
+  environment: prod
+  app.kubernetes.io/instance: bookstore-prod
+
+# Image transformations for prod environment
+images:
+  - name: ${CONTAINER_REGISTRY}/bookstore-api
+    newName: ${CONTAINER_REGISTRY}/bookstore-api
+    newTag: ${IMAGE_TAG}  # Use semantic version tags in prod
+
+# ConfigMap for prod-specific configuration
+configMapGenerator:
+  - name: bookstore-config
+    literals:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=info
+      - ENABLE_DEBUG=false
+
+# Production replicas for high availability
+replicas:
+  - name: bookstore-main
+    count: 3  # High availability
+  - name: bookstore-search
+    count: 2
+  - name: bookstore-graph
+    count: 2
+
+# Production resource limits (full resources as defined in base)

@@ -1,11 +1,11 @@
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: products-api
+  name: cart-api
   namespace: bookstore
   labels:
     app: bookstore
-    component: products-api
+    component: cart-api
 spec:
   template:
     metadata:
@@ -19,12 +19,12 @@ spec:
         autoscaling.knative.dev/scale-down-delay: "30s"
       labels:
         app: bookstore
-        component: products-api
+        component: cart-api
         version: v1
     spec:
       containerConcurrency: 100
       containers:
-      - name: products-api
+      - name: cart-api
         image: ${CONTAINER_REGISTRY}/bookstore-api:${IMAGE_TAG}
         ports:
         - containerPort: 3000
@@ -35,22 +35,12 @@ spec:
         - name: PORT
           value: "3000"
         - name: SERVICE_NAME
-          value: "products"
+          value: "cart"
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
               name: bookstore-api-secrets
               key: database-url-main
-        - name: SEARCH_DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: bookstore-api-secrets
-              key: database-url-search
-        - name: GRAPH_DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: bookstore-api-secrets
-              key: database-url-graph
         - name: KEYCLOAK_URL
           value: "http://keycloak.bookstore.svc.cluster.local:8080"
         - name: KEYCLOAK_REALM
@@ -85,26 +75,3 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 5
       timeoutSeconds: 300
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: bookstore-api-secrets
-  namespace: bookstore
-type: Opaque
-stringData:
-  # NOTE: These are PLACEHOLDER values for development only
-  # In production, use SealedSecrets or External Secrets Operator
-  # See: kubernetes/base/secrets/ for proper secret management
-
-  # Main database (products, cart, orders, users, cache, leaderboard)
-  database-url-main: "postgresql://bookstore:REPLACE_ME@bookstore-main-rw.bookstore.svc.cluster.local:5432/bookstore"
-  # Search database (full-text search with pg_trgm + ts_vector)
-  database-url-search: "postgresql://bookstore:REPLACE_ME@bookstore-search-rw.bookstore.svc.cluster.local:5432/bookstore_search"
-  # Graph database (recommendations with Apache AGE)
-  database-url-graph: "postgresql://bookstore:REPLACE_ME@bookstore-graph-rw.bookstore.svc.cluster.local:5432/bookstore_graph"
-  # Keycloak OIDC client credentials
-  keycloak-client-id: "bookstore-api"
-  keycloak-client-secret: "REPLACE_ME"
-  # JWT signing secret
-  jwt-secret: "REPLACE_ME"

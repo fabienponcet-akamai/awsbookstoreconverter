@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: bookstore
+
+bases:
+  - ../../base/databases
+  - ../../base/knative
+  - ../../base/gateway
+
+# Environment-specific labels
+commonLabels:
+  environment: dev
+  app.kubernetes.io/instance: bookstore-dev
+
+# Image transformations for dev environment
+images:
+  - name: ${CONTAINER_REGISTRY}/bookstore-api
+    newName: ${CONTAINER_REGISTRY}/bookstore-api
+    newTag: dev-latest
+
+# ConfigMap for dev-specific configuration
+configMapGenerator:
+  - name: bookstore-config
+    literals:
+      - ENVIRONMENT=development
+      - LOG_LEVEL=debug
+      - ENABLE_DEBUG=true
+
+# Resource patches for dev (lower resources)
+patchesStrategicMerge:
+  - patches/resources-dev.yaml
+
+replicas:
+  - name: bookstore-main
+    count: 1  # Single instance for dev
+  - name: bookstore-search
+    count: 1
+  - name: bookstore-graph
+    count: 1

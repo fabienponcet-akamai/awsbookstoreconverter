@@ -1,0 +1,272 @@
+---
+# Job to initialize main database schema
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: init-main-database
+  namespace: bookstore
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  template:
+    metadata:
+      labels:
+        app: bookstore
+        component: database-init
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-db
+          image: postgres:15
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h bookstore-main-rw.bookstore.svc.cluster.local -p 5432 -U bookstore; do
+                echo "Waiting for main database..."
+                sleep 5
+              done
+              echo "Main database is ready!"
+      containers:
+        - name: migrate
+          image: postgres:15
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              echo "Running main database initialization..."
+
+              # Copy migration files (you'll need to add these to ConfigMap or mount them)
+              psql $DATABASE_URL <<'EOF'
+              -- Add your base schema here or load from src/api/db/migrations/
+              CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+              CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+              -- Create base tables
+              CREATE TABLE IF NOT EXISTS products (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                title TEXT NOT NULL,
+                author TEXT NOT NULL,
+                isbn TEXT UNIQUE,
+                price NUMERIC(10, 2) NOT NULL,
+                category TEXT,
+                description TEXT,
+                image_url TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+              );
+
+              CREATE TABLE IF NOT EXISTS users (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                email TEXT UNIQUE NOT NULL,
+                username TEXT UNIQUE NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+              );
+
+              CREATE TABLE IF NOT EXISTS orders (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                user_id UUID REFERENCES users(id),
+                status TEXT NOT NULL DEFAULT 'pending',
+                total NUMERIC(10, 2) NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+              );
+
+              CREATE TABLE IF NOT EXISTS order_items (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                order_id UUID REFERENCES orders(id) ON DELETE CASCADE,
+                product_id UUID REFERENCES products(id),
+                quantity INT NOT NULL,
+                price NUMERIC(10, 2) NOT NULL
+              );
+
+              CREATE TABLE IF NOT EXISTS cart (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                user_id UUID REFERENCES users(id),
+                product_id UUID REFERENCES products(id),
+                quantity INT NOT NULL DEFAULT 1,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(user_id, product_id)
+              );
+
+              CREATE TABLE IF NOT EXISTS reviews (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                product_id UUID REFERENCES products(id) ON DELETE CASCADE,
+                user_id UUID REFERENCES users(id),
+                rating NUMERIC(2, 1) CHECK (rating >= 1 AND rating <= 5),
+                review_text TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+              );
+
+              EOF
+
+              # Run cache and leaderboard migration
+              psql $DATABASE_URL < /migrations/003-cache-leaderboard.sql || echo "Migration 003 already applied or failed"
+
+              echo "Main database initialized successfully!"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: bookstore-api-secrets
+                  key: database-url-main
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+      volumes:
+        - name: migrations
+          configMap:
+            name: database-migrations
+---
+# Job to initialize search database
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: init-search-database
+  namespace: bookstore
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  template:
+    metadata:
+      labels:
+        app: bookstore
+        component: database-init
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-db
+          image: postgres:15
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h bookstore-search-rw.bookstore.svc.cluster.local -p 5432 -U bookstore; do
+                echo "Waiting for search database..."
+                sleep 5
+              done
+              echo "Search database is ready!"
+      containers:
+        - name: migrate
+          image: postgres:15
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              echo "Running search database initialization..."
+
+              psql $SEARCH_DATABASE_URL <<'EOF'
+              -- Enable extensions
+              CREATE EXTENSION IF NOT EXISTS pg_trgm;
+              CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
+              CREATE EXTENSION IF NOT EXISTS unaccent;
+              EOF
+
+              # Run search migration
+              psql $SEARCH_DATABASE_URL < /migrations/001-search-database.sql || echo "Migration 001 already applied or failed"
+
+              echo "Search database initialized successfully!"
+          env:
+            - name: SEARCH_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: bookstore-api-secrets
+                  key: database-url-search
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+      volumes:
+        - name: migrations
+          configMap:
+            name: database-migrations
+---
+# Job to initialize graph database
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: init-graph-database
+  namespace: bookstore
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  template:
+    metadata:
+      labels:
+        app: bookstore
+        component: database-init
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-db
+          image: postgres:15
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h bookstore-graph-rw.bookstore.svc.cluster.local -p 5432 -U bookstore; do
+                echo "Waiting for graph database..."
+                sleep 5
+              done
+              echo "Graph database is ready!"
+      containers:
+        - name: migrate
+          image: postgres:15
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              echo "Running graph database initialization..."
+
+              psql $GRAPH_DATABASE_URL <<'EOF'
+              -- Enable Apache AGE extension (note: AGE must be installed in PostgreSQL)
+              CREATE EXTENSION IF NOT EXISTS age;
+              LOAD 'age';
+              SET search_path = ag_catalog, "$user", public;
+              EOF
+
+              # Run graph migration
+              psql $GRAPH_DATABASE_URL < /migrations/002-graph-database.sql || echo "Migration 002 already applied or failed"
+
+              echo "Graph database initialized successfully!"
+          env:
+            - name: GRAPH_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: bookstore-api-secrets
+                  key: database-url-graph
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+      volumes:
+        - name: migrations
+          configMap:
+            name: database-migrations
+---
+# ConfigMap with migration SQL files
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: database-migrations
+  namespace: bookstore
+data:
+  # NOTE: In production, these should be loaded from your actual SQL migration files
+  # You can create this ConfigMap from files with:
+  # kubectl create configmap database-migrations --from-file=src/api/db/migrations/ -n bookstore
+
+  001-search-database.sql: |
+    -- Placeholder: Add actual content from src/api/db/migrations/001-search-database.sql
+    SELECT 'Search database migration placeholder' as message;
+
+  002-graph-database.sql: |
+    -- Placeholder: Add actual content from src/api/db/migrations/002-graph-database.sql
+    SELECT 'Graph database migration placeholder' as message;
+
+  003-cache-leaderboard.sql: |
+    -- Placeholder: Add actual content from src/api/db/migrations/003-cache-leaderboard.sql
+    SELECT 'Cache/Leaderboard migration placeholder' as message;

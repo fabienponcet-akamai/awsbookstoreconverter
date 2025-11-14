@@ -1,11 +1,11 @@
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: products-api
+  name: recommendations-api
   namespace: bookstore
   labels:
     app: bookstore
-    component: products-api
+    component: recommendations-api
 spec:
   template:
     metadata:
@@ -13,18 +13,18 @@ spec:
         # Auto-scaling configuration
         autoscaling.knative.dev/min-scale: "0"  # Scale to zero
         autoscaling.knative.dev/max-scale: "10"
-        autoscaling.knative.dev/target: "100"  # Target 100 concurrent requests per pod
+        autoscaling.knative.dev/target: "100"
         autoscaling.knative.dev/metric: "concurrency"
         # Timeout
         autoscaling.knative.dev/scale-down-delay: "30s"
       labels:
         app: bookstore
-        component: products-api
+        component: recommendations-api
         version: v1
     spec:
       containerConcurrency: 100
       containers:
-      - name: products-api
+      - name: recommendations-api
         image: ${CONTAINER_REGISTRY}/bookstore-api:${IMAGE_TAG}
         ports:
         - containerPort: 3000
@@ -35,22 +35,17 @@ spec:
         - name: PORT
           value: "3000"
         - name: SERVICE_NAME
-          value: "products"
-        - name: DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: bookstore-api-secrets
-              key: database-url-main
-        - name: SEARCH_DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: bookstore-api-secrets
-              key: database-url-search
+          value: "recommendations"
         - name: GRAPH_DATABASE_URL
           valueFrom:
             secretKeyRef:
               name: bookstore-api-secrets
               key: database-url-graph
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: bookstore-api-secrets
+              key: database-url-main
         - name: KEYCLOAK_URL
           value: "http://keycloak.bookstore.svc.cluster.local:8080"
         - name: KEYCLOAK_REALM
@@ -67,11 +62,11 @@ spec:
               key: keycloak-client-secret
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "200m"
+            memory: "512Mi"  # More memory for graph queries
+            cpu: "250m"
           limits:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: "1Gi"
+            cpu: "750m"
         livenessProbe:
           httpGet:
             path: /health
@@ -85,26 +80,3 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 5
       timeoutSeconds: 300
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: bookstore-api-secrets
-  namespace: bookstore
-type: Opaque
-stringData:
-  # NOTE: These are PLACEHOLDER values for development only
-  # In production, use SealedSecrets or External Secrets Operator
-  # See: kubernetes/base/secrets/ for proper secret management
-
-  # Main database (products, cart, orders, users, cache, leaderboard)
-  database-url-main: "postgresql://bookstore:REPLACE_ME@bookstore-main-rw.bookstore.svc.cluster.local:5432/bookstore"
-  # Search database (full-text search with pg_trgm + ts_vector)
-  database-url-search: "postgresql://bookstore:REPLACE_ME@bookstore-search-rw.bookstore.svc.cluster.local:5432/bookstore_search"
-  # Graph database (recommendations with Apache AGE)
-  database-url-graph: "postgresql://bookstore:REPLACE_ME@bookstore-graph-rw.bookstore.svc.cluster.local:5432/bookstore_graph"
-  # Keycloak OIDC client credentials
-  keycloak-client-id: "bookstore-api"
-  keycloak-client-secret: "REPLACE_ME"
-  # JWT signing secret
-  jwt-secret: "REPLACE_ME"

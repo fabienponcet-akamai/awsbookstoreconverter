@@ -1,0 +1,104 @@
+# Resource patches for development environment
+# Lower resource requests for cost savings in dev
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: products-api
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "3"  # Lower max for dev
+    spec:
+      containers:
+        - name: products-api
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "300m"
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: cart-api
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/max-scale: "3"
+    spec:
+      containers:
+        - name: cart-api
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "300m"
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: orders-api
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/max-scale: "5"
+    spec:
+      containers:
+        - name: orders-api
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "150m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: search-api
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/min-scale: "0"  # Can scale to zero in dev
+        autoscaling.knative.dev/max-scale: "5"
+    spec:
+      containers:
+        - name: search-api
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "150m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: recommendations-api
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/max-scale: "3"
+    spec:
+      containers:
+        - name: recommendations-api
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "150m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

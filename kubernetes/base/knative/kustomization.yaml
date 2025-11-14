@@ -5,6 +5,10 @@ namespace: bookstore
 
 resources:
   - products-service.yaml
+  - cart-service.yaml
+  - orders-service.yaml
+  - search-service.yaml
+  - recommendations-service.yaml
 
 commonLabels:
   app.kubernetes.io/part-of: bookstore
