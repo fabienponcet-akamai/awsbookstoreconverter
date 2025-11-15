@@ -1,0 +1,206 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: s3-upload
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/component: tekton-task
+    app.kubernetes.io/created-by: apl-core
+spec:
+  description: Upload files to Linode Object Storage (S3-compatible)
+  params:
+  - name: source-path
+    type: string
+    description: Path to files to upload (relative to workspace)
+    default: "."
+  - name: bucket-name
+    type: string
+    description: S3 bucket name
+  - name: region
+    type: string
+    description: S3 region (e.g., us-east-1)
+    default: "us-east-1"
+  - name: endpoint-url
+    type: string
+    description: S3 endpoint URL
+    default: "https://us-east-1.linodeobjects.com"
+  - name: cache-control-assets
+    type: string
+    description: Cache-Control header for assets (non-HTML files)
+    default: "public, max-age=31536000, immutable"
+  - name: cache-control-html
+    type: string
+    description: Cache-Control header for HTML files
+    default: "no-cache, no-store, must-revalidate"
+  - name: delete-removed
+    type: string
+    description: Delete files from bucket that don't exist in source
+    default: "true"
+
+  workspaces:
+  - name: source
+    description: Workspace containing files to upload
+
+  steps:
+  - name: install-s3cmd
+    image: python:3.11-alpine
+    script: |
+      #!/bin/sh
+      set -e
+      echo "Installing s3cmd..."
+      pip install --quiet s3cmd
+      echo "✅ s3cmd installed successfully"
+
+  - name: configure-s3cmd
+    image: python:3.11-alpine
+    env:
+    - name: AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: object-storage-credentials
+          key: access-key
+    - name: AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: object-storage-credentials
+          key: secret-key
+    script: |
+      #!/bin/sh
+      set -e
+
+      echo "Configuring s3cmd..."
+      cat > ~/.s3cfg <<EOF
+      [default]
+      access_key = ${AWS_ACCESS_KEY_ID}
+      secret_key = ${AWS_SECRET_ACCESS_KEY}
+      host_base = $(params.region).linodeobjects.com
+      host_bucket = %(bucket)s.$(params.region).linodeobjects.com
+      use_https = True
+      signature_v2 = False
+      EOF
+
+      echo "✅ s3cmd configured"
+
+  - name: upload-assets
+    image: python:3.11-alpine
+    workingDir: $(workspaces.source.path)/$(params.source-path)
+    script: |
+      #!/bin/sh
+      set -e
+
+      pip install --quiet s3cmd
+
+      # Configure s3cmd
+      cat > ~/.s3cfg <<EOF
+      [default]
+      access_key = ${AWS_ACCESS_KEY_ID}
+      secret_key = ${AWS_SECRET_ACCESS_KEY}
+      host_base = $(params.region).linodeobjects.com
+      host_bucket = %(bucket)s.$(params.region).linodeobjects.com
+      use_https = True
+      signature_v2 = False
+      EOF
+
+      echo "📤 Uploading static assets (JS, CSS, images)..."
+      s3cmd sync \
+        --acl-public \
+        --no-mime-magic \
+        --guess-mime-type \
+        --add-header="Cache-Control: $(params.cache-control-assets)" \
+        --exclude="*.html" \
+        $(if [ "$(params.delete-removed)" = "true" ]; then echo "--delete-removed"; fi) \
+        ./ s3://$(params.bucket-name)/
+
+      echo "✅ Assets uploaded successfully"
+    env:
+    - name: AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: object-storage-credentials
+          key: access-key
+    - name: AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: object-storage-credentials
+          key: secret-key
+
+  - name: upload-html
+    image: python:3.11-alpine
+    workingDir: $(workspaces.source.path)/$(params.source-path)
+    script: |
+      #!/bin/sh
+      set -e
+
+      pip install --quiet s3cmd
+
+      # Configure s3cmd
+      cat > ~/.s3cfg <<EOF
+      [default]
+      access_key = ${AWS_ACCESS_KEY_ID}
+      secret_key = ${AWS_SECRET_ACCESS_KEY}
+      host_base = $(params.region).linodeobjects.com
+      host_bucket = %(bucket)s.$(params.region).linodeobjects.com
+      use_https = True
+      signature_v2 = False
+      EOF
+
+      echo "📤 Uploading HTML files (no cache)..."
+      s3cmd sync \
+        --acl-public \
+        --no-mime-magic \
+        --guess-mime-type \
+        --add-header="Cache-Control: $(params.cache-control-html)" \
+        --include="*.html" \
+        --exclude="*" \
+        $(if [ "$(params.delete-removed)" = "true" ]; then echo "--delete-removed"; fi) \
+        ./ s3://$(params.bucket-name)/
+
+      echo "✅ HTML files uploaded successfully"
+    env:
+    - name: AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: object-storage-credentials
+          key: access-key
+    - name: AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: object-storage-credentials
+          key: secret-key
+
+  - name: verify-upload
+    image: python:3.11-alpine
+    script: |
+      #!/bin/sh
+      set -e
+
+      pip install --quiet s3cmd
+
+      # Configure s3cmd
+      cat > ~/.s3cfg <<EOF
+      [default]
+      access_key = ${AWS_ACCESS_KEY_ID}
+      secret_key = ${AWS_SECRET_ACCESS_KEY}
+      host_base = $(params.region).linodeobjects.com
+      host_bucket = %(bucket)s.$(params.region).linodeobjects.com
+      use_https = True
+      signature_v2 = False
+      EOF
+
+      echo "🔍 Verifying upload..."
+      file_count=$(s3cmd ls -r s3://$(params.bucket-name)/ | wc -l)
+      echo "✅ Upload verified: $file_count files in bucket"
+      echo ""
+      echo "📍 Frontend URL: https://$(params.bucket-name).$(params.region).linodeobjects.com/index.html"
+      echo "📍 CDN URL: https://$(params.bucket-name).$(params.region).cdn.linode.com/index.html"
+    env:
+    - name: AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: object-storage-credentials
+          key: access-key
+    - name: AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: object-storage-credentials
+          key: secret-key
