@@ -1,0 +1,50 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: gitea-frontend-binding
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/component: tekton-triggers
+    app.kubernetes.io/created-by: apl-core
+spec:
+  params:
+  # Git repository details from Gitea webhook payload
+  - name: git-repo-url
+    value: $(body.repository.clone_url)
+  - name: git-revision
+    value: $(body.after)  # Commit SHA
+  - name: git-repo-name
+    value: $(body.repository.name)
+  - name: git-repo-full-name
+    value: $(body.repository.full_name)
+  - name: git-branch
+    value: $(extensions.branch_name)
+  - name: pusher-name
+    value: $(body.pusher.username)
+  - name: commit-message
+    value: $(body.commits[0].message)
+
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: gitea-api-binding
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/component: tekton-triggers
+    app.kubernetes.io/created-by: apl-core
+spec:
+  params:
+  # Git repository details from Gitea webhook payload
+  - name: git-repo-url
+    value: $(body.repository.clone_url)
+  - name: git-revision
+    value: $(body.after)  # Commit SHA
+  - name: git-repo-name
+    value: $(body.repository.name)
+  - name: git-repo-full-name
+    value: $(body.repository.full_name)
+  - name: pusher-name
+    value: $(body.pusher.username)
+  - name: commit-message
+    value: $(body.commits[0].message)

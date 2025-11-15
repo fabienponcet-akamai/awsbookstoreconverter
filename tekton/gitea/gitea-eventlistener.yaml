@@ -1,0 +1,107 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: gitea-listener
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/component: tekton-triggers
+    app.kubernetes.io/created-by: apl-core
+spec:
+  serviceAccountName: tekton-gitea-sa
+  triggers:
+  # Trigger for frontend (push to main branch)
+  - name: gitea-frontend-push-trigger
+    interceptors:
+    - ref:
+        name: "gitea"
+      params:
+      - name: "secretRef"
+        value:
+          secretName: gitea-webhook-secret
+          secretKey: webhook-secret
+      - name: "eventTypes"
+        value: ["push"]
+    - ref:
+        name: "cel"
+      params:
+      - name: "filter"
+        value: "body.ref == 'refs/heads/main'"
+      - name: "overlays"
+        value:
+        - key: branch_name
+          expression: "body.ref.split('/')[2]"
+    bindings:
+    - ref: gitea-frontend-binding
+    template:
+      ref: gitea-frontend-template
+
+  # Trigger for API (push to main branch, changes in src/api/)
+  - name: gitea-api-push-trigger
+    interceptors:
+    - ref:
+        name: "gitea"
+      params:
+      - name: "secretRef"
+        value:
+          secretName: gitea-webhook-secret
+          secretKey: webhook-secret
+      - name: "eventTypes"
+        value: ["push"]
+    - ref:
+        name: "cel"
+      params:
+      - name: "filter"
+        value: "body.ref == 'refs/heads/main'"
+    bindings:
+    - ref: gitea-api-binding
+    template:
+      ref: gitea-api-template
+
+---
+# Service to expose EventListener
+apiVersion: v1
+kind: Service
+metadata:
+  name: el-gitea-listener
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/component: tekton-triggers
+    app.kubernetes.io/created-by: apl-core
+spec:
+  type: ClusterIP
+  selector:
+    eventlistener: gitea-listener
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+
+---
+# Optional: Ingress for external webhook access
+# Uncomment if Gitea needs to access EventListener from outside cluster
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: gitea-webhook-ingress
+#   namespace: bookstore
+#   annotations:
+#     cert-manager.io/cluster-issuer: letsencrypt-prod
+#     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+# spec:
+#   ingressClassName: nginx
+#   tls:
+#   - hosts:
+#     - webhook.bookstore.example.com
+#     secretName: webhook-tls
+#   rules:
+#   - host: webhook.bookstore.example.com
+#     http:
+#       paths:
+#       - path: /
+#         pathType: Prefix
+#         backend:
+#           service:
+#             name: el-gitea-listener
+#             port:
+#               number: 8080

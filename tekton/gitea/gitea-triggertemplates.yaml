@@ -1,0 +1,129 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: gitea-frontend-template
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/component: tekton-triggers
+    app.kubernetes.io/created-by: apl-core
+spec:
+  params:
+  - name: git-repo-url
+    description: The git repository URL
+  - name: git-revision
+    description: The git revision (commit SHA)
+  - name: git-repo-name
+    description: The repository name
+  - name: git-repo-full-name
+    description: The repository full name (org/repo)
+  - name: git-branch
+    description: The git branch
+    default: main
+  - name: pusher-name
+    description: Username who pushed the commit
+  - name: commit-message
+    description: Commit message
+
+  resourcetemplates:
+  - apiVersion: tekton.dev/v1beta1
+    kind: PipelineRun
+    metadata:
+      generateName: gitea-frontend-
+      namespace: bookstore
+      labels:
+        tekton.dev/pipeline: bookstore-frontend-s3-deploy
+        app.kubernetes.io/triggered-by: gitea
+        git/repo: $(tt.params.git-repo-name)
+        git/branch: $(tt.params.git-branch)
+      annotations:
+        git/commit: $(tt.params.git-revision)
+        git/pusher: $(tt.params.pusher-name)
+        git/message: $(tt.params.commit-message)
+    spec:
+      pipelineRef:
+        name: bookstore-frontend-s3-deploy
+      params:
+      - name: git-url
+        value: $(tt.params.git-repo-url)
+      - name: git-revision
+        value: $(tt.params.git-revision)
+      - name: bucket-name
+        value: bookstore-frontend
+      - name: s3-region
+        value: us-east-1
+      workspaces:
+      - name: shared-workspace
+        volumeClaimTemplate:
+          spec:
+            accessModes:
+            - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+      serviceAccountName: tekton-gitea-sa
+      timeout: 1h0m0s
+
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: gitea-api-template
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/component: tekton-triggers
+    app.kubernetes.io/created-by: apl-core
+spec:
+  params:
+  - name: git-repo-url
+    description: The git repository URL
+  - name: git-revision
+    description: The git revision (commit SHA)
+  - name: git-repo-name
+    description: The repository name
+  - name: git-repo-full-name
+    description: The repository full name (org/repo)
+  - name: pusher-name
+    description: Username who pushed the commit
+  - name: commit-message
+    description: Commit message
+
+  resourcetemplates:
+  - apiVersion: tekton.dev/v1beta1
+    kind: PipelineRun
+    metadata:
+      generateName: gitea-api-
+      namespace: bookstore
+      labels:
+        tekton.dev/pipeline: bookstore-api-build-deploy
+        app.kubernetes.io/triggered-by: gitea
+        git/repo: $(tt.params.git-repo-name)
+      annotations:
+        git/commit: $(tt.params.git-revision)
+        git/pusher: $(tt.params.pusher-name)
+        git/message: $(tt.params.commit-message)
+    spec:
+      pipelineRef:
+        name: bookstore-api-build-deploy
+      params:
+      - name: git-url
+        value: $(tt.params.git-repo-url)
+      - name: git-revision
+        value: $(tt.params.git-revision)
+      - name: image-name
+        value: bookstore-api
+      - name: image-tag
+        value: $(tt.params.git-revision)
+      workspaces:
+      - name: shared-workspace
+        volumeClaimTemplate:
+          spec:
+            accessModes:
+            - ReadWriteOnce
+            resources:
+              requests:
+                storage: 2Gi
+      - name: docker-credentials
+        secret:
+          secretName: regcred
+      serviceAccountName: tekton-gitea-sa
+      timeout: 1h0m0s
