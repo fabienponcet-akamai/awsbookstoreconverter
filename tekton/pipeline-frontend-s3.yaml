@@ -1,0 +1,241 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: bookstore-frontend-s3-deploy
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/component: tekton-pipeline
+    app.kubernetes.io/created-by: apl-core
+    app.kubernetes.io/name: bookstore-frontend-s3
+spec:
+  description: |
+    Build React frontend and deploy to Linode Object Storage (S3-compatible)
+    This pipeline follows AWS Bookstore pattern: CodeBuild → S3 + CloudFront
+
+  params:
+  - name: git-url
+    type: string
+    description: Git repository URL
+  - name: git-revision
+    type: string
+    description: Git revision to checkout
+    default: main
+  - name: bucket-name
+    type: string
+    description: S3 bucket name for frontend hosting
+    default: bookstore-frontend
+  - name: s3-region
+    type: string
+    description: S3 region
+    default: us-east-1
+  - name: node-version
+    type: string
+    description: Node.js version to use
+    default: "20"
+
+  workspaces:
+  - name: shared-workspace
+    description: Shared workspace for pipeline tasks
+
+  tasks:
+  # Task 1: Clone Git repository
+  - name: fetch-repository
+    taskRef:
+      name: git-clone
+      kind: ClusterTask
+    workspaces:
+    - name: output
+      workspace: shared-workspace
+    params:
+    - name: url
+      value: $(params.git-url)
+    - name: revision
+      value: $(params.git-revision)
+    - name: deleteExisting
+      value: "true"
+
+  # Task 2: Install dependencies
+  - name: install-dependencies
+    runAfter:
+    - fetch-repository
+    taskSpec:
+      workspaces:
+      - name: source
+      params:
+      - name: node-version
+      steps:
+      - name: npm-install
+        image: node:$(params.node-version)-alpine
+        workingDir: $(workspaces.source.path)/src/frontend
+        script: |
+          #!/bin/sh
+          set -e
+          echo "📦 Installing dependencies..."
+          npm ci --prefer-offline --no-audit
+          echo "✅ Dependencies installed successfully"
+    workspaces:
+    - name: source
+      workspace: shared-workspace
+    params:
+    - name: node-version
+      value: $(params.node-version)
+
+  # Task 3: Lint code
+  - name: lint
+    runAfter:
+    - install-dependencies
+    taskSpec:
+      workspaces:
+      - name: source
+      params:
+      - name: node-version
+      steps:
+      - name: run-lint
+        image: node:$(params.node-version)-alpine
+        workingDir: $(workspaces.source.path)/src/frontend
+        script: |
+          #!/bin/sh
+          set -e
+          echo "🔍 Running linter..."
+          npm run lint || echo "⚠️  Linting warnings found (continuing)"
+          echo "✅ Lint check completed"
+    workspaces:
+    - name: source
+      workspace: shared-workspace
+    params:
+    - name: node-version
+      value: $(params.node-version)
+
+  # Task 4: Build React application
+  - name: build
+    runAfter:
+    - lint
+    taskSpec:
+      workspaces:
+      - name: source
+      params:
+      - name: node-version
+      steps:
+      - name: npm-build
+        image: node:$(params.node-version)-alpine
+        workingDir: $(workspaces.source.path)/src/frontend
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: VITE_API_URL
+          value: "https://api.bookstore.example.com"
+        - name: VITE_API_VERSION
+          value: "v1"
+        - name: VITE_KEYCLOAK_URL
+          value: "https://auth.bookstore.example.com"
+        - name: VITE_KEYCLOAK_REALM
+          value: "bookstore"
+        - name: VITE_KEYCLOAK_CLIENT_ID
+          value: "bookstore-frontend"
+        script: |
+          #!/bin/sh
+          set -e
+          echo "🏗️  Building React application..."
+          npm run build
+
+          echo ""
+          echo "📊 Build statistics:"
+          du -sh dist/
+          find dist/ -type f | wc -l | xargs echo "Total files:"
+          echo ""
+          echo "✅ Build completed successfully"
+
+          # List build output
+          ls -lh dist/
+    workspaces:
+    - name: source
+      workspace: shared-workspace
+    params:
+    - name: node-version
+      value: $(params.node-version)
+
+  # Task 5: Upload to S3/Object Storage
+  - name: upload-to-s3
+    runAfter:
+    - build
+    taskRef:
+      name: s3-upload
+    workspaces:
+    - name: source
+      workspace: shared-workspace
+    params:
+    - name: source-path
+      value: "src/frontend/dist"
+    - name: bucket-name
+      value: $(params.bucket-name)
+    - name: region
+      value: $(params.s3-region)
+    - name: cache-control-assets
+      value: "public, max-age=31536000, immutable"
+    - name: cache-control-html
+      value: "no-cache, no-store, must-revalidate"
+    - name: delete-removed
+      value: "true"
+
+  # Task 6: Notify completion
+  - name: notify-completion
+    runAfter:
+    - upload-to-s3
+    taskSpec:
+      params:
+      - name: bucket-name
+      - name: s3-region
+      steps:
+      - name: print-urls
+        image: alpine:latest
+        script: |
+          #!/bin/sh
+          echo ""
+          echo "════════════════════════════════════════════════════════════"
+          echo "🎉 Frontend deployment completed successfully!"
+          echo "════════════════════════════════════════════════════════════"
+          echo ""
+          echo "📍 Direct Object Storage URL:"
+          echo "   https://$(params.bucket-name).$(params.s3-region).linodeobjects.com/index.html"
+          echo ""
+          echo "📍 CDN URL (recommended):"
+          echo "   https://$(params.bucket-name).$(params.s3-region).cdn.linode.com/index.html"
+          echo ""
+          echo "🔧 Next steps:"
+          echo "   1. Configure DNS CNAME to point to CDN"
+          echo "   2. Set up custom domain in Linode Cloud Manager"
+          echo "   3. Enable HTTPS with Let's Encrypt or custom certificate"
+          echo ""
+          echo "════════════════════════════════════════════════════════════"
+    params:
+    - name: bucket-name
+      value: $(params.bucket-name)
+    - name: s3-region
+      value: $(params.s3-region)
+---
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  generateName: bookstore-frontend-s3-deploy-run-
+  namespace: bookstore
+spec:
+  pipelineRef:
+    name: bookstore-frontend-s3-deploy
+  params:
+  - name: git-url
+    value: https://github.com/YOUR_ORG/awsbookstoreconverter.git  # CHANGEME
+  - name: git-revision
+    value: main
+  - name: bucket-name
+    value: bookstore-frontend
+  - name: s3-region
+    value: us-east-1
+  workspaces:
+  - name: shared-workspace
+    volumeClaimTemplate:
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
