@@ -54,43 +54,168 @@ Ce document définit la **stratégie optimale de node pools** pour déployer l'e
 
 ---
 
+## 🌐 Architecture Réseau Complète
+
+### Flux Utilisateur et Séparation Frontend/Backend
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         INTERNET                                 │
+└──────────────┬──────────────────────────┬───────────────────────┘
+               │                          │
+               │ Frontend (Statique)      │ Backend (Dynamique)
+               ▼                          ▼
+    ┌──────────────────────┐   ┌──────────────────────────┐
+    │  Akamai CDN          │   │  NodeBalancer (LKE)      │
+    └──────────┬───────────┘   └──────────┬───────────────┘
+               │                          │
+               ▼                          ▼
+    ┌──────────────────────┐   ┌──────────────────────────┐
+    │ Linode Object        │   │ Istio Ingress Gateway    │
+    │ Storage (S3)         │   │ (Node Pool 2)            │
+    │                      │   └──────────┬───────────────┘
+    │ ❌ PAS K8S           │              │
+    │ ❌ PAS ISTIO         │              │ VirtualService
+    └──────────────────────┘              ▼
+                              ┌──────────────────────────┐
+                              │ Knative Services         │
+                              │ (Node Pool 3)            │
+                              │ • bookstore-api          │
+                              │ • products-svc           │
+                              │ • cart-svc               │
+                              │ • orders-svc             │
+                              │ • search-svc             │
+                              │ • recommendations-svc    │
+                              └──────────┬───────────────┘
+                                         │
+                                         ▼
+                              ┌──────────────────────────┐
+                              │ CloudNative-PG           │
+                              │ (Node Pool 4)            │
+                              │ • bookstore-db           │
+                              │ • search-db              │
+                              │ • graph-db               │
+                              └──────────────────────────┘
+```
+
+**Points Clés** :
+- ✅ **Frontend React** → Object Storage + CDN (HORS Kubernetes)
+- ✅ **Ingress Gateway** → Uniquement pour APIs backend (Knative Services)
+- ✅ **70-80% du trafic HTTP** → Géré par S3/CDN, pas par K8s
+- ✅ **Charge réduite** sur l'Ingress Gateway
+
+### Configuration DNS
+
+```bash
+# Frontend - Object Storage + CDN (PAS dans Kubernetes)
+bookstore.example.com            CNAME   akamai.cdn.example.com
+akamai.cdn.example.com           CNAME   us-east-1.linodeobjects.com
+
+# Backend API - Istio Ingress Gateway (DANS Kubernetes)
+api.bookstore.example.com        A       <NodeBalancer IP LKE>
+
+# Authentification - Keycloak (DANS Kubernetes)
+auth.bookstore.example.com       A       <NodeBalancer IP LKE>
+```
+
+---
+
+## 🏗️ APL Core : Opérateurs vs Instances
+
+### Distinction Importante
+
+**APL Core fournit les OPÉRATEURS (Pool 1)** :
+- Knative Serving Controller → Gère les Knative Services
+- CloudNative-PG Operator → Gère les PostgreSQL Clusters
+- Istio Control Plane → Gère le service mesh
+
+**Nous créons les INSTANCES applicatives (Pools 2-4)** :
+- Knative Services → Gérées par Knative (APL)
+- PostgreSQL Clusters → Gérés par CNPG (APL)
+- Istio Gateways → Gérés par Istio (APL)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    APL CORE ARCHITECTURE                     │
+├─────────────────────────────────────────────────────────────┤
+│ Pool 1: Opérateurs APL Core                                 │
+│  ├─ Knative Serving Controller  ← Fourni par APL           │
+│  ├─ CloudNative-PG Operator     ← Fourni par APL           │
+│  ├─ Istio Control Plane         ← Fourni par APL           │
+│  └─ Tekton, ArgoCD, Gitea...    ← Fourni par APL           │
+│                                                              │
+│ Pool 2: Istio Data Plane (géré par APL Istio)               │
+│  └─ istio-ingressgateway        ← Utilise Istio APL        │
+│                                                              │
+│ Pool 3: Instances Knative (géré par APL Knative)            │
+│  └─ bookstore-api, products...  ← Utilise Knative APL      │
+│                                                              │
+│ Pool 4: Instances CNPG (géré par APL CNPG)                  │
+│  └─ bookstore-db, search-db...  ← Utilise CNPG APL         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**100% APL Core** : Tous les composants sont fournis ou gérés par APL ! 🎯
+
+---
+
 ## 🎯 Stratégie de Node Pools Recommandée
 
-### Option 1 : Production (4 Node Pools) - Recommandé
+### Option 1 : Production (5 Node Pools) - Recommandé
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │                    LKE CLUSTER ARCHITECTURE                     │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐ │
-│  │  NODE POOL 1: CONTROL PLANE (APL Core)                   │ │
+│  │  NODE POOL 1: CONTROL PLANE (APL Core Operators)         │ │
 │  │  ─────────────────────────────────────────────────────── │ │
 │  │  Type: g6-standard-4 (4 vCPU, 8 GB RAM)                  │ │
 │  │  Nodes: 3 (HA)                                           │ │
 │  │  Auto-scale: 3-5                                         │ │
 │  │                                                           │ │
-│  │  Workloads:                                              │ │
+│  │  Workloads APL Core (Opérateurs):                        │ │
 │  │  • Gitea                    (Git repository)             │ │
-│  │  • ArgoCD                   (GitOps)                     │ │
-│  │  • Tekton Triggers          (Webhooks)                   │ │
+│  │  • ArgoCD                   (GitOps controller)          │ │
+│  │  • Tekton Controllers       (CI/CD)                      │ │
 │  │  • Istio Control Plane      (istiod)                     │ │
 │  │  • Knative Serving          (Controllers)                │ │
 │  │  • Cert-Manager             (TLS)                        │ │
 │  │  • CloudNative-PG Operator  (DB Operator)                │ │
-│  │  • Keycloak                 (Auth)                       │ │
+│  │  • Keycloak                 (Auth server)                │ │
 │  │                                                           │ │
 │  │  Labels: role=control-plane, workload=apl-core          │ │
 │  │  Taints: None (accepte tous les workloads si besoin)    │ │
 │  └──────────────────────────────────────────────────────────┘ │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐ │
-│  │  NODE POOL 2: APPLICATIONS (Knative Services)            │ │
+│  │  NODE POOL 2: INGRESS GATEWAYS (Istio Data Plane) ⭐     │ │
+│  │  ─────────────────────────────────────────────────────── │ │
+│  │  Type: g6-standard-2 (2 vCPU, 4 GB RAM)                  │ │
+│  │  Nodes: 2 (HA)                                           │ │
+│  │  Auto-scale: 2-4 (selon trafic API)                     │ │
+│  │                                                           │ │
+│  │  Workloads (géré par Istio APL):                         │ │
+│  │  • istio-ingressgateway     (API traffic)                │ │
+│  │    - api.bookstore.example.com                           │ │
+│  │    - auth.bookstore.example.com (Keycloak)               │ │
+│  │                                                           │ │
+│  │  ❌ PAS le frontend (sur Object Storage)                │ │
+│  │  ✅ Uniquement trafic backend APIs                       │ │
+│  │                                                           │ │
+│  │  Labels: role=ingress, workload=gateway                 │ │
+│  │  Taints: workload=ingress:NoSchedule                    │ │
+│  │  Exposition: NodeBalancer (LoadBalancer type)           │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │  NODE POOL 3: APPLICATIONS (Knative Services)            │ │
 │  │  ─────────────────────────────────────────────────────── │ │
 │  │  Type: g6-standard-2 (2 vCPU, 4 GB RAM)                  │ │
 │  │  Nodes: 3 (HA)                                           │ │
 │  │  Auto-scale: 3-10 (burst support)                       │ │
 │  │                                                           │ │
-│  │  Workloads:                                              │ │
+│  │  Workloads (géré par Knative APL):                       │ │
 │  │  • Products API             (Knative Service)            │ │
 │  │  • Cart API                 (Knative Service)            │ │
 │  │  • Orders API               (Knative Service)            │ │
@@ -103,13 +228,13 @@ Ce document définit la **stratégie optimale de node pools** pour déployer l'e
 │  └──────────────────────────────────────────────────────────┘ │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐ │
-│  │  NODE POOL 3: DATABASES (CloudNative-PG)                 │ │
+│  │  NODE POOL 4: DATABASES (CloudNative-PG)                 │ │
 │  │  ─────────────────────────────────────────────────────── │ │
 │  │  Type: g6-dedicated-4 (4 vCPU, 16 GB RAM, NVMe)          │ │
 │  │  Nodes: 3 (HA pour 3 clusters PG)                       │ │
 │  │  Auto-scale: NO (stable database sizing)                │ │
 │  │                                                           │ │
-│  │  Workloads:                                              │ │
+│  │  Workloads (géré par CloudNative-PG APL):                │ │
 │  │  • PostgreSQL Main Cluster  (3 instances)                │ │
 │  │  • PostgreSQL Search        (2 instances)                │ │
 │  │  • PostgreSQL Graph         (2 instances)                │ │
@@ -120,13 +245,13 @@ Ce document définit la **stratégie optimale de node pools** pour déployer l'e
 │  └──────────────────────────────────────────────────────────┘ │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐ │
-│  │  NODE POOL 4: CI/CD BUILDS (Tekton Pipelines)            │ │
+│  │  NODE POOL 5: CI/CD BUILDS (Tekton Pipelines)            │ │
 │  │  ─────────────────────────────────────────────────────── │ │
 │  │  Type: g6-standard-4 (4 vCPU, 8 GB RAM)                  │ │
-│  │  Nodes: 1 (peut être 0 si pas de builds)                │ │
+│  │  Nodes: 0-1 (peut être 0 si pas de builds)              │ │
 │  │  Auto-scale: 0-5 (scale to zero)                        │ │
 │  │                                                           │ │
-│  │  Workloads:                                              │ │
+│  │  Workloads (géré par Tekton APL):                        │ │
 │  │  • Tekton PipelineRuns      (npm build, Docker build)    │ │
 │  │  • TaskRuns                 (git-clone, s3-upload)       │ │
 │  │  • Build Workspaces         (PVC temporaires)            │ │
@@ -137,7 +262,7 @@ Ce document définit la **stratégie optimale de node pools** pour déployer l'e
 │  └──────────────────────────────────────────────────────────┘ │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐ │
-│  │  NODE POOL 5: MONITORING (Optionnel)                     │ │
+│  │  NODE POOL 6: MONITORING (Optionnel)                     │ │
 │  │  ─────────────────────────────────────────────────────── │ │
 │  │  Type: g6-standard-2 (2 vCPU, 4 GB RAM)                  │ │
 │  │  Nodes: 2                                                │ │
@@ -229,7 +354,164 @@ Pour environnement dev/staging :
 
 ---
 
-### Node Pool 2 : Applications (Knative Services)
+### Node Pool 2 : Ingress Gateways (Istio Data Plane)
+
+**Instance Type** : `g6-standard-2`
+- **vCPU** : 2
+- **RAM** : 4 GB
+- **Stockage** : 50 GB SSD
+- **Réseau** : 2 Gbps (important pour gateway)
+
+**Nombre de nodes** : 2 (HA)
+**Auto-scaling** : 2-4
+
+**Rôle** : Point d'entrée pour TOUT le trafic backend API
+
+**Répartition des ressources** :
+
+| Composant | Replicas | CPU (request) | RAM (request) | CPU (limit) | RAM (limit) |
+|-----------|----------|---------------|---------------|-------------|-------------|
+| istio-ingressgateway | 2 | 500m | 512Mi | 2000m | 2Gi |
+
+**Configuration Istio Gateway** :
+
+```yaml
+# kubernetes/base/gateway/istio-ingressgateway.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: istio-ingressgateway
+  namespace: istio-system
+  annotations:
+    service.beta.kubernetes.io/linode-loadbalancer-throttle: "20"
+spec:
+  type: LoadBalancer  # → NodeBalancer LKE
+  selector:
+    app: istio-ingressgateway
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  - name: https
+    port: 443
+    targetPort: 8443
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: istio-ingressgateway
+  namespace: istio-system
+spec:
+  replicas: 2  # HA
+  selector:
+    matchLabels:
+      app: istio-ingressgateway
+  template:
+    metadata:
+      labels:
+        app: istio-ingressgateway
+    spec:
+      nodeSelector:
+        workload.type: gateway
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: ingress
+        effect: NoSchedule
+      containers:
+      - name: istio-proxy
+        image: gcr.io/istio-release/proxyv2:1.20.0
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+```
+
+**Services Exposés via ce Gateway** :
+
+```yaml
+# Gateway configuration
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: bookstore-gateway
+  namespace: bookstore
+spec:
+  selector:
+    app: istio-ingressgateway  # Pool 2
+  servers:
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: bookstore-tls
+    hosts:
+    - "api.bookstore.example.com"      # ✅ Backend APIs
+    - "auth.bookstore.example.com"     # ✅ Keycloak
+    # PAS bookstore.example.com         # ❌ Frontend (S3)
+```
+
+**CORS Configuration** :
+
+```yaml
+# VirtualService avec CORS pour frontend S3
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: bookstore-api
+  namespace: bookstore
+spec:
+  hosts:
+  - "api.bookstore.example.com"
+  gateways:
+  - bookstore-gateway
+  http:
+  - corsPolicy:
+      allowOrigins:
+      - exact: "https://bookstore.example.com"  # Frontend S3
+      allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      allowHeaders:
+      - authorization
+      - content-type
+      maxAge: "24h"
+    route:
+    - destination:
+        host: products-svc.bookstore.svc.cluster.local
+      weight: 100
+```
+
+**Charge attendue** :
+- Uniquement trafic **APIs backend** (pas de frontend statique)
+- ~20-30% du trafic total (70% géré par S3/CDN)
+- CPU : ~1 CPU total (0.5 CPU par node)
+- RAM : ~1Gi total (512Mi par node)
+
+**Utilisation par node** :
+- CPU : ~25% (headroom pour burst)
+- RAM : ~13% (très léger)
+
+**Auto-scaling** :
+- 2 nodes (normal) → 4 nodes (pic de trafic API)
+- Triggers : >70% CPU ou >10000 req/s
+
+**Coût mensuel** :
+- Nodes (2 × $36/mois) : ~$72/mois
+- NodeBalancer (inclus dans LKE) : $0
+- **Total** : **$72/mois**
+
+---
+
+### Node Pool 3 : Applications (Knative Services)
 
 **Instance Type** : `g6-standard-2`
 - **vCPU** : 2
@@ -312,7 +594,7 @@ Pour environnement dev/staging :
 
 ---
 
-### Node Pool 4 : CI/CD Builds (Tekton)
+### Node Pool 5 : CI/CD Builds (Tekton)
 
 **Instance Type** : `g6-standard-4`
 - **vCPU** : 4
@@ -346,7 +628,7 @@ Pour environnement dev/staging :
 
 ---
 
-### Node Pool 5 : Monitoring (Optionnel)
+### Node Pool 6 : Monitoring (Optionnel)
 
 **Instance Type** : `g6-standard-2`
 - **vCPU** : 2
@@ -391,24 +673,30 @@ node.kubernetes.io/role: control-plane
 workload.type: apl-core
 environment: production
 
-# Node Pool 2: Applications
+# Node Pool 2: Ingress Gateways
+node.kubernetes.io/role: ingress
+workload.type: gateway
+network.intensive: "true"
+environment: production
+
+# Node Pool 3: Applications
 node.kubernetes.io/role: application
 workload.type: knative
 environment: production
 
-# Node Pool 3: Databases
+# Node Pool 4: Databases
 node.kubernetes.io/role: database
 workload.type: postgres
 storage.type: high-iops
 environment: production
 
-# Node Pool 4: Builds
+# Node Pool 5: Builds
 node.kubernetes.io/role: build
 workload.type: tekton
 cost.optimization: preemptible
 environment: ci-cd
 
-# Node Pool 5: Monitoring
+# Node Pool 6: Monitoring
 node.kubernetes.io/role: monitoring
 workload.type: observability
 environment: production
@@ -417,25 +705,31 @@ environment: production
 ### Taints de Node
 
 ```yaml
-# Node Pool 2: Applications (force Knative services only)
+# Node Pool 2: Ingress Gateways (force gateways only)
+taints:
+- key: workload
+  value: ingress
+  effect: NoSchedule
+
+# Node Pool 3: Applications (force Knative services only)
 taints:
 - key: workload
   value: application
   effect: NoSchedule
 
-# Node Pool 3: Databases (force databases only)
+# Node Pool 4: Databases (force databases only)
 taints:
 - key: workload
   value: database
   effect: NoSchedule
 
-# Node Pool 4: Builds (force builds only)
+# Node Pool 5: Builds (force builds only)
 taints:
 - key: workload
   value: build
   effect: NoSchedule
 
-# Node Pool 5: Monitoring (force monitoring only)
+# Node Pool 6: Monitoring (force monitoring only)
 taints:
 - key: workload
   value: monitoring
@@ -445,7 +739,24 @@ taints:
 ### Tolerations dans les Pods
 
 ```yaml
-# Knative Services (Applications)
+# Istio Ingress Gateway (Pool 2)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: istio-ingressgateway
+  namespace: istio-system
+spec:
+  template:
+    spec:
+      nodeSelector:
+        workload.type: gateway
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: ingress
+        effect: NoSchedule
+
+# Knative Services (Applications - Pool 3)
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
@@ -496,40 +807,48 @@ spec:
 
 ## 💰 Analyse des Coûts
 
-### Option 1 : Production (4-5 Node Pools)
+### Option 1 : Production (5-6 Node Pools)
 
 | Node Pool | Type | Nodes | Prix/node | Sous-total |
 |-----------|------|-------|-----------|------------|
-| Control Plane | g6-standard-4 | 3 | $32 | $96 |
-| Applications | g6-standard-2 | 3-10 | $24 | $72-240 |
-| Databases | g6-dedicated-4 | 3 | $96 | $288 |
-| Builds | g6-standard-4 | 0-2 | $32 | $0-64 |
-| Monitoring | g6-standard-2 | 2 | $24 | $48 |
-| **Subtotal Compute** | | | | **$504-736/mois** |
-| Block Storage | | 305 Gi | $0.10/Gi | $30.50 |
-| Object Storage | | 10 Gi | $0.02/Gi | $0.20 |
+| 1. Control Plane | g6-standard-4 | 3 | $72 | $216 |
+| 2. Ingress Gateways | g6-standard-2 | 2 | $36 | $72 |
+| 3. Applications | g6-standard-2 | 3-10 | $36 | $108-360 |
+| 4. Databases | g6-dedicated-4 | 3 | $72 | $216 |
+| 5. Builds | g6-standard-4 | 0-2 | $72 | $0-144 |
+| 6. Monitoring | g6-standard-2 | 2 | $36 | $72 |
+| **Subtotal Compute** | | | | **$684-1080/mois** |
+| Block Storage (DBs) | | 210 Gi | $0.10/Gi | $21 |
+| Object Storage (Frontend) | | 500 Gi + CDN | ~$10/mois | $10 |
 | Bandwidth | | 1 TB | Included | $0 |
-| **TOTAL** | | | | **~$535-770/mois** |
+| **TOTAL K8s** | | | | **~$705-1111/mois** |
+| **TOTAL avec S3** | | | | **~$715-1121/mois** |
 
-**Moyenne** : ~$650/mois pour production HA
+**Moyenne Production HA** : ~$800/mois (K8s + Object Storage + CDN)
 
-### Option 2 : Coût Optimisé (3 Node Pools)
+### Option 2 : Coût Optimisé (4 Node Pools)
 
-| Configuration | Coût mensuel |
-|---------------|--------------|
-| Control Plane + Monitoring | $96 |
-| Applications (moyenne) | $120 |
-| Databases + Builds | $288 |
-| Storage | $30 |
-| **TOTAL** | **~$534/mois** |
-
-### Option 3 : Développement (1-2 Node Pools)
+Fusionner Control Plane + Monitoring, et Ingress + Applications :
 
 | Configuration | Coût mensuel |
 |---------------|--------------|
-| All-in-one (3 nodes g6-standard-4) | $96 |
-| Storage minimal | $10 |
-| **TOTAL** | **~$106/mois** |
+| 1. Control Plane + Monitoring (3× g6-standard-4) | $216 |
+| 2. Ingress + Applications (3-8× g6-standard-2) | $108-288 |
+| 3. Databases (3× g6-dedicated-4) | $216 |
+| 4. Builds (0-2× g6-standard-4) | $0-144 |
+| Storage + Object Storage | $31 |
+| **TOTAL** | **~$571-895/mois** |
+
+**Moyenne** : ~$650/mois
+
+### Option 3 : Développement (2 Node Pools)
+
+| Configuration | Coût mensuel |
+|---------------|--------------|
+| 1. Control Plane + Ingress (3× g6-standard-2) | $108 |
+| 2. Apps + DBs (3× g6-standard-4) | $216 |
+| Storage minimal | $15 |
+| **TOTAL** | **~$339/mois** |
 
 ---
 
@@ -619,7 +938,27 @@ resource "linode_lke_cluster" "bookstore" {
     }
   }
 
-  # Node Pool 2: Applications
+  # Node Pool 2: Ingress Gateways
+  pool {
+    type  = "g6-standard-2"
+    count = 2
+    autoscaler {
+      min = 2
+      max = 4
+    }
+    labels = {
+      "node.kubernetes.io/role" = "ingress"
+      "workload.type"           = "gateway"
+      "network.intensive"       = "true"
+    }
+    taints {
+      key    = "workload"
+      value  = "ingress"
+      effect = "NoSchedule"
+    }
+  }
+
+  # Node Pool 3: Applications
   pool {
     type  = "g6-standard-2"
     count = 3
@@ -638,7 +977,7 @@ resource "linode_lke_cluster" "bookstore" {
     }
   }
 
-  # Node Pool 3: Databases
+  # Node Pool 4: Databases
   pool {
     type  = "g6-dedicated-4"
     count = 3
@@ -658,7 +997,7 @@ resource "linode_lke_cluster" "bookstore" {
     }
   }
 
-  # Node Pool 4: Builds
+  # Node Pool 5: Builds
   pool {
     type  = "g6-standard-4"
     count = 0
@@ -676,6 +1015,25 @@ resource "linode_lke_cluster" "bookstore" {
       effect = "NoSchedule"
     }
   }
+
+  # Node Pool 6: Monitoring (Optionnel)
+  pool {
+    type  = "g6-standard-2"
+    count = 2
+    autoscaler {
+      min = 2
+      max = 3
+    }
+    labels = {
+      "node.kubernetes.io/role" = "monitoring"
+      "workload.type"           = "observability"
+    }
+    taints {
+      key    = "workload"
+      value  = "monitoring"
+      effect = "NoSchedule"
+    }
+  }
 }
 ```
 
@@ -685,46 +1043,52 @@ resource "linode_lke_cluster" "bookstore" {
 
 | Approche | Node Pools | Coût/mois | Isolation | Performance | HA | Recommandé pour |
 |----------|------------|-----------|-----------|-------------|----|--------------------|
-| **Single Pool** | 1 | $96-150 | ❌ | ⭐⭐ | ⭐⭐ | Dev/Test |
-| **Minimal** | 2-3 | $300-400 | ⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | Staging |
-| **Optimisé** | 3 | $530-550 | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Production budget |
-| **Production** | 4-5 | $650-770 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Production HA |
+| **Minimal Dev** | 2 | $339 | ⭐⭐ | ⭐⭐ | ⭐⭐ | Dev/Test |
+| **Optimisé** | 4 | $571-895 | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Staging/Prod budget |
+| **Production HA** | 5-6 | $715-1121 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Production HA |
 
 ---
 
 ## ✅ Recommandations Finales
 
-### Pour Production (Recommandé)
+### Pour Production HA (Recommandé)
 
-**4 Node Pools** :
-1. **Control Plane** (3× g6-standard-4) - APL Core
-2. **Applications** (3-10× g6-standard-2) - Knative avec auto-scale
-3. **Databases** (3× g6-dedicated-4) - PostgreSQL avec I/O haute performance
-4. **Builds** (0-5× g6-standard-4) - Tekton avec scale-to-zero
+**5-6 Node Pools** :
+1. **Control Plane** (3× g6-standard-4) - APL Core Opérateurs
+2. **Ingress Gateways** (2× g6-standard-2) - Istio Data Plane ⭐ NOUVEAU
+3. **Applications** (3-10× g6-standard-2) - Knative Services avec auto-scale
+4. **Databases** (3× g6-dedicated-4) - CloudNative-PG avec I/O haute performance
+5. **Builds** (0-5× g6-standard-4) - Tekton avec scale-to-zero
+6. **Monitoring** (2× g6-standard-2) - Prometheus/Grafana (optionnel)
 
-**Avantages** :
-- ✅ Isolation complète des charges
+**Points clés** :
+- ✅ **Frontend** → Object Storage + Akamai CDN (HORS Kubernetes)
+- ✅ **Ingress Gateway** → Uniquement pour APIs backend
+- ✅ **70-80% du trafic** → Géré par S3/CDN, pas par K8s
+- ✅ Isolation complète des charges de travail
 - ✅ Performance optimale (databases sur nodes dédiés)
 - ✅ Cost control (builds scale-to-zero)
-- ✅ HA garantie (3 nodes minimum partout)
+- ✅ HA garantie (minimum 2 nodes partout)
+
+**Coût** : ~$800/mois (incluant Object Storage + CDN)
+
+### Pour Staging/Production Budget
+
+**4 Node Pools** (fusionné) :
+1. **Control Plane + Monitoring** (3× g6-standard-4)
+2. **Ingress + Applications** (3-8× g6-standard-2)
+3. **Databases** (3× g6-dedicated-4)
+4. **Builds** (0-2× g6-standard-4)
 
 **Coût** : ~$650/mois
 
-### Pour Staging
+### Pour Dev/Test
 
-**3 Node Pools** :
-1. **Control Plane + Monitoring** (3× g6-standard-4)
-2. **Applications** (2-5× g6-standard-2)
-3. **Databases** (2× g6-standard-4)
+**2 Node Pools** :
+1. **Control Plane + Ingress** (3× g6-standard-2)
+2. **Apps + DBs** (3× g6-standard-4)
 
-**Coût** : ~$400/mois
-
-### Pour Dev
-
-**1 Node Pool** :
-- All-in-one (3× g6-standard-2)
-
-**Coût** : ~$72/mois
+**Coût** : ~$339/mois
 
 ---
 
@@ -732,8 +1096,21 @@ resource "linode_lke_cluster" "bookstore" {
 
 | Environnement | Node Pools | Nodes Total | Coût/mois | Use Case |
 |---------------|------------|-------------|-----------|----------|
-| **Production** | 4-5 | 9-21 | $650-770 | Production HA, isolation complète |
-| **Staging** | 3 | 7-10 | $400-500 | Pre-production, tests |
-| **Dev** | 1-2 | 3-5 | $72-150 | Développement, CI |
+| **Production HA** | 5-6 | 13-27 | $715-1121 | Production HA, isolation complète |
+| **Staging/Prod Budget** | 4 | 9-16 | $571-895 | Pre-production, prod budget |
+| **Dev/Test** | 2 | 6 | $339 | Développement, CI |
 
-**Recommandation** : Commencer avec **3 node pools (Option Optimisée)** pour équilibrer coût et performance, puis migrer vers 4-5 pools pour production à haute charge.
+**Architecture Clé** :
+- 🌐 **Frontend** : Object Storage + Akamai CDN (70-80% du trafic, HORS K8s)
+- 🚪 **Ingress** : Pool dédié pour Istio Gateway (APIs backend uniquement)
+- 🚀 **Applications** : Pool Knative auto-scale (scale-to-zero)
+- 💾 **Databases** : Pool dédié haute performance (NVMe, I/O optimisé)
+- 🔨 **Builds** : Pool scale-to-zero Tekton (coût optimisé)
+
+**Recommandation** : Démarrer avec **4 node pools (Option Optimisée)** pour équilibrer coût/performance, puis migrer vers **5-6 pools** pour production HA à haute charge.
+
+**Points Critiques** :
+- ✅ Tous les composants gérés par **APL Core** (100% CNCF stack)
+- ✅ Séparation frontend statique (S3) vs backend dynamique (K8s)
+- ✅ Pool Ingress Gateway **essentiel** pour isolation du trafic API
+- ✅ Auto-scaling intelligent (applications et builds)
