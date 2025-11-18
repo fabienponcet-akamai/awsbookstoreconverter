@@ -48,6 +48,65 @@ Ce document décrit les workflows de données pour l'architecture hybride qui ut
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
+## ⚡ Mutualisation des Workers Outbox (Event Router Pattern)
+
+**IMPORTANT** : Les 3 workers Outbox mentionnés dans ce document (Search Sync, Reco Sync, Bestsellers Update) sont **mutualisés** en un seul **Event Router** qui poll la table `outbox_events` une seule fois et route les événements vers les handlers appropriés.
+
+### Pourquoi mutualiser ?
+
+Au lieu de 3 workers séparés qui pollent la même table `outbox_events` :
+- ❌ **3 polls simultanés** de la même table (charge DB × 3)
+- ❌ **Code dupliqué** pour le polling (3 fois le même code)
+- ❌ **3 connexions DB** distinctes
+
+Nous utilisons un **Event Router Pattern** centralisé :
+- ✅ **1 seul poll** de la table (charge DB / 3)
+- ✅ **Code centralisé** et réutilisable
+- ✅ **1 connexion DB** pour le polling
+- ✅ **Facile d'ajouter** de nouveaux consumers
+
+### Architecture mutualisée
+
+```
+┌─────────────────────────────────────┐
+│ DBaaS PostgreSQL Main               │
+│   outbox_events table               │
+└───────────┬─────────────────────────┘
+            │ Poll 1× (every 5s)
+            ▼
+┌───────────────────────────────────┐
+│   Outbox Event Router             │
+│   (Single Worker)                 │
+│                                   │
+│   - Polls events once             │
+│   - Routes to handlers            │
+│   - Marks processed once          │
+└───┬───────┬───────────┬───────────┘
+    │       │           │
+    ▼       ▼           ▼
+┌────────┐ ┌────────┐ ┌────────┐
+│ Search │ │  Reco  │ │Best-   │
+│Handler │ │Handler │ │sellers │
+│        │ │        │ │Handler │
+│→OpenSea│ │→Reco DB│ │→ Redis │
+└────────┘ └────────┘ └────────┘
+```
+
+### Documentation complète
+
+Pour l'implémentation complète du Event Router Pattern, voir :
+
+📄 **[OUTBOX_EVENT_ROUTER_PATTERN.md](./OUTBOX_EVENT_ROUTER_PATTERN.md)**
+
+Ce document détaille :
+- L'architecture du Event Router
+- Le code TypeScript complet du router et des 3 handlers
+- La configuration Kubernetes
+- Les gains de performance (66% de réduction de charge DB)
+- Comment ajouter facilement de nouveaux consumers
+
+---
+
 ## Workflow 1 : Application → DBaaS PostgreSQL
 
 ### Architecture de connexion
