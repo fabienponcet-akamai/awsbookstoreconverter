@@ -8,29 +8,44 @@ Ce document décrit les workflows de données pour l'architecture hybride qui ut
 ## Vue d'ensemble de l'architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      LKE Cluster (APL Core)                  │
-│  ┌────────────────┐    ┌──────────────┐    ┌─────────────┐ │
-│  │  Application   │───▶│    Redis     │    │ OpenSearch  │ │
-│  │  (Knative)     │    │  (Operator)  │    │ (Operator)  │ │
-│  └────────────────┘    └──────────────┘    └─────────────┘ │
-│         │                                          ▲         │
-│         │                                          │         │
-│         │                  ┌─────────────────┐    │         │
-│         │                  │ Outbox Worker   │────┘         │
-│         │                  │  (Deployment)   │              │
-│         │                  └─────────────────┘              │
-└─────────┼────────────────────────────┬───────────────────────┘
-          │                            │
-          │ SSL Connection             │ Poll & Sync
-          ▼                            ▼
-┌──────────────────────────────────────────────────────────────┐
-│              DBaaS PostgreSQL (Akamai Managed)               │
-│  ┌─────────────┐  ┌─────────────┐  ┌──────────────────┐    │
-│  │    Main     │  │  outbox_    │  │   wal_level =    │    │
-│  │   Tables    │  │  events     │  │   'logical'      │    │
-│  └─────────────┘  └─────────────┘  └──────────────────┘    │
-└──────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│                        LKE Cluster (APL Core)                          │
+│  ┌────────────────┐    ┌──────────────┐    ┌─────────────┐          │
+│  │  Application   │───▶│    Redis     │    │ OpenSearch  │          │
+│  │  (Knative)     │    │  (Operator)  │    │ (Operator)  │          │
+│  └────────────────┘    └──────────────┘    └─────────────┘          │
+│         │                                          ▲                   │
+│         │                                          │                   │
+│         │                  ┌─────────────────┐    │                   │
+│         │                  │ Outbox Worker   │────┘                   │
+│         │                  │  (Search Sync)  │                        │
+│         │                  └─────────────────┘                        │
+│         │                                                              │
+│         │                  ┌─────────────────┐                        │
+│         │                  │ Reco Sync       │                        │
+│         │                  │  Worker         │                        │
+│         │                  └─────────────────┘                        │
+└─────────┼────────────────────────────┬──────────────┬─────────────────┘
+          │                            │              │
+          │ SSL                        │ Poll         │ Sync Events
+          ▼                            ▼              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│              DBaaS PostgreSQL Main (Akamai Managed)                  │
+│  ┌─────────────┐  ┌─────────────┐  ┌──────────────────┐            │
+│  │    Main     │  │  outbox_    │  │   wal_level =    │            │
+│  │   Tables    │  │  events     │  │   'logical'      │            │
+│  └─────────────┘  └─────────────┘  └──────────────────┘            │
+└──────────────────────────────────────────────────────────────────────┘
+                                       ▲
+                                       │ Sync (Outbox Pattern)
+                                       │
+┌──────────────────────────────────────────────────────────────────────┐
+│         DBaaS PostgreSQL Recommendations (Akamai Managed)            │
+│  ┌───────────────┐  ┌──────────────┐  ┌────────────────┐           │
+│  │ User Vectors  │  │   Similar    │  │   Trending     │           │
+│  │ (Embeddings)  │  │   Books      │  │   Books        │           │
+│  └───────────────┘  └──────────────┘  └────────────────┘           │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Workflow 1 : Application → DBaaS PostgreSQL
@@ -1081,6 +1096,856 @@ async function checkOpenSearch() {
   }
 }
 ```
+
+## Workflow 6 : Système de Recommandations avec DBaaS PostgreSQL
+
+### Architecture du système de recommandations
+
+Le système de recommandations utilise une **base de données PostgreSQL DBaaS séparée** pour :
+- Isoler les charges de travail analytiques des opérations transactionnelles
+- Permettre un scaling indépendant
+- Optimiser les index et configurations pour les requêtes analytiques
+
+### Schéma de la base Recommendations
+
+```sql
+-- Base DBaaS PostgreSQL Recommendations
+-- Instance séparée : lin-67890-1234.postgres.linodelke.net
+
+-- Extension pgvector pour les embeddings
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm; -- Pour similarité texte
+
+-- Table : User Behavior (répliquée depuis Main DB)
+CREATE TABLE user_interactions (
+  id BIGSERIAL PRIMARY KEY,
+  user_id UUID NOT NULL,
+  book_id UUID NOT NULL,
+  interaction_type VARCHAR(50) NOT NULL, -- view, add_to_cart, purchase, search
+  interaction_weight FLOAT NOT NULL DEFAULT 1.0,
+  metadata JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_user_interactions_user ON user_interactions(user_id, created_at DESC);
+CREATE INDEX idx_user_interactions_book ON user_interactions(book_id);
+CREATE INDEX idx_user_interactions_type ON user_interactions(interaction_type);
+
+-- Table : User Preference Vectors (ML embeddings)
+CREATE TABLE user_vectors (
+  user_id UUID PRIMARY KEY,
+  preference_vector vector(128) NOT NULL, -- Embedding 128 dimensions
+  favorite_categories TEXT[],
+  favorite_authors TEXT[],
+  avg_price_range NUMRANGE,
+  last_computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  total_interactions INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_user_vectors_embedding ON user_vectors
+  USING ivfflat (preference_vector vector_cosine_ops)
+  WITH (lists = 100);
+
+-- Table : Book Vectors (ML embeddings)
+CREATE TABLE book_vectors (
+  book_id UUID PRIMARY KEY,
+  title VARCHAR(500) NOT NULL,
+  author VARCHAR(200) NOT NULL,
+  category VARCHAR(100),
+  price DECIMAL(10,2),
+  content_vector vector(128) NOT NULL, -- Embedding du contenu
+  popularity_score FLOAT DEFAULT 0.0,
+  synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_book_vectors_embedding ON book_vectors
+  USING ivfflat (content_vector vector_cosine_ops)
+  WITH (lists = 100);
+
+CREATE INDEX idx_book_vectors_category ON book_vectors(category);
+CREATE INDEX idx_book_vectors_popularity ON book_vectors(popularity_score DESC);
+
+-- Table : Similar Books (précalculés)
+CREATE TABLE similar_books (
+  book_id UUID NOT NULL,
+  similar_book_id UUID NOT NULL,
+  similarity_score FLOAT NOT NULL,
+  similarity_type VARCHAR(50) NOT NULL, -- content, collaborative, hybrid
+  computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (book_id, similar_book_id)
+);
+
+CREATE INDEX idx_similar_books_score ON similar_books(book_id, similarity_score DESC);
+
+-- Table : Trending Books (mise à jour périodique)
+CREATE TABLE trending_books (
+  book_id UUID PRIMARY KEY,
+  title VARCHAR(500) NOT NULL,
+  trend_score FLOAT NOT NULL,
+  view_count_24h INTEGER DEFAULT 0,
+  purchase_count_24h INTEGER DEFAULT 0,
+  purchase_count_7d INTEGER DEFAULT 0,
+  trend_velocity FLOAT DEFAULT 0.0, -- Rate of change
+  category VARCHAR(100),
+  computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_trending_books_score ON trending_books(trend_score DESC);
+CREATE INDEX idx_trending_books_category ON trending_books(category, trend_score DESC);
+
+-- Table : Personalized Recommendations (cache)
+CREATE TABLE user_recommendations (
+  user_id UUID NOT NULL,
+  book_id UUID NOT NULL,
+  recommendation_score FLOAT NOT NULL,
+  recommendation_reason VARCHAR(200),
+  computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '1 hour',
+  PRIMARY KEY (user_id, book_id)
+);
+
+CREATE INDEX idx_user_recommendations_score ON user_recommendations(user_id, recommendation_score DESC);
+CREATE INDEX idx_user_recommendations_expiry ON user_recommendations(expires_at);
+
+-- Cleanup automatique des recommandations expirées
+CREATE OR REPLACE FUNCTION cleanup_expired_recommendations()
+RETURNS void AS $$
+BEGIN
+  DELETE FROM user_recommendations WHERE expires_at < NOW();
+END;
+$$ LANGUAGE plpgsql;
+```
+
+### Configuration de connexion DBaaS Recommendations
+
+```typescript
+// config/database.ts
+
+// DBaaS PostgreSQL Main
+export const mainDb = new Pool({
+  host: process.env.DBAAS_MAIN_HOST, // lin-12345-6789.postgres.linodelke.net
+  port: 5432,
+  database: 'bookstore_main',
+  user: process.env.DBAAS_MAIN_USER,
+  password: process.env.DBAAS_MAIN_PASSWORD,
+  ssl: {
+    rejectUnauthorized: true,
+    ca: fs.readFileSync('/etc/secrets/main-db-ca.crt', 'utf8')
+  },
+  max: 20
+});
+
+// DBaaS PostgreSQL Recommendations (instance séparée)
+export const recoDb = new Pool({
+  host: process.env.DBAAS_RECO_HOST, // lin-67890-1234.postgres.linodelke.net
+  port: 5432,
+  database: 'bookstore_recommendations',
+  user: process.env.DBAAS_RECO_USER,
+  password: process.env.DBAAS_RECO_PASSWORD,
+  ssl: {
+    rejectUnauthorized: true,
+    ca: fs.readFileSync('/etc/secrets/reco-db-ca.crt', 'utf8')
+  },
+  max: 15 // Moins de connexions car analytique
+});
+```
+
+### Secrets Kubernetes pour les 2 bases
+
+```yaml
+# secrets/dbaas-postgresql-main.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dbaas-postgresql-main
+  namespace: bookstore
+type: Opaque
+stringData:
+  host: lin-12345-6789.postgres.linodelke.net
+  database: bookstore_main
+  username: bookstore_user
+  password: <main-db-password>
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    ...
+    -----END CERTIFICATE-----
+---
+# secrets/dbaas-postgresql-recommendations.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dbaas-postgresql-recommendations
+  namespace: bookstore
+type: Opaque
+stringData:
+  host: lin-67890-1234.postgres.linodelke.net
+  database: bookstore_recommendations
+  username: bookstore_reco_user
+  password: <reco-db-password>
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    ...
+    -----END CERTIFICATE-----
+```
+
+## Workflow 7 : Synchronisation Main DB → Recommendations DB
+
+### Architecture de synchronisation
+
+La synchronisation entre Main DB et Recommendations DB utilise le **Outbox Pattern** avec un worker dédié qui :
+1. Poll la table `outbox_events` du DBaaS Main
+2. Extrait les événements pertinents pour les recommandations
+3. Transforme et écrit dans DBaaS Recommendations
+4. Marque les événements comme traités
+
+### Événements synchronisés
+
+```typescript
+// types/events.ts
+export enum RecommendationEventType {
+  // User interactions
+  BOOK_VIEWED = 'book_viewed',
+  BOOK_SEARCHED = 'book_searched',
+  BOOK_ADDED_TO_CART = 'book_added_to_cart',
+  BOOK_PURCHASED = 'book_purchased',
+
+  // Book updates
+  BOOK_CREATED = 'book_created',
+  BOOK_UPDATED = 'book_updated',
+  BOOK_DELETED = 'book_deleted',
+
+  // Compute triggers
+  COMPUTE_USER_VECTOR = 'compute_user_vector',
+  COMPUTE_TRENDING = 'compute_trending'
+}
+
+export interface BookInteractionEvent {
+  userId: string;
+  bookId: string;
+  interactionType: 'view' | 'search' | 'add_to_cart' | 'purchase';
+  metadata?: {
+    searchQuery?: string;
+    price?: number;
+    category?: string;
+  };
+  timestamp: string;
+}
+```
+
+### Worker de synchronisation
+
+```typescript
+// workers/recommendations-sync.ts
+import { mainDb, recoDb } from '../config/database';
+
+export class RecommendationsSyncWorker {
+  private isProcessing = false;
+  private batchSize = 50;
+  private pollInterval = 10000; // 10 secondes
+
+  async start() {
+    console.log('Recommendations Sync Worker started');
+
+    setInterval(async () => {
+      if (!this.isProcessing) {
+        await this.syncEvents();
+      }
+    }, this.pollInterval);
+  }
+
+  async syncEvents() {
+    this.isProcessing = true;
+    const mainClient = await mainDb.connect();
+    const recoClient = await recoDb.connect();
+
+    try {
+      // 1. Récupérer événements non traités depuis Main DB
+      const eventsResult = await mainClient.query(`
+        SELECT id, aggregate_id, aggregate_type, event_type, payload, created_at
+        FROM outbox_events
+        WHERE processed = false
+          AND event_type IN (
+            'book_viewed', 'book_searched', 'book_added_to_cart', 'book_purchased',
+            'book_created', 'book_updated'
+          )
+        ORDER BY created_at ASC
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED
+      `, [this.batchSize]);
+
+      if (eventsResult.rows.length === 0) {
+        return;
+      }
+
+      console.log(`Syncing ${eventsResult.rows.length} events to Recommendations DB`);
+
+      // 2. Traiter chaque événement
+      for (const event of eventsResult.rows) {
+        await this.handleEvent(event, recoClient);
+
+        // 3. Marquer comme traité dans Main DB
+        await mainClient.query(
+          'UPDATE outbox_events SET processed = true, processed_at = NOW() WHERE id = $1',
+          [event.id]
+        );
+      }
+
+      console.log(`Successfully synced ${eventsResult.rows.length} events`);
+
+    } catch (error) {
+      console.error('Error syncing recommendations events:', error);
+    } finally {
+      mainClient.release();
+      recoClient.release();
+      this.isProcessing = false;
+    }
+  }
+
+  async handleEvent(event: any, recoClient: any) {
+    const { event_type, payload } = event;
+    const data = JSON.parse(payload);
+
+    switch (event_type) {
+      case 'book_viewed':
+        await this.trackInteraction(recoClient, data, 'view', 1.0);
+        break;
+
+      case 'book_searched':
+        await this.trackInteraction(recoClient, data, 'search', 0.5);
+        break;
+
+      case 'book_added_to_cart':
+        await this.trackInteraction(recoClient, data, 'add_to_cart', 3.0);
+        break;
+
+      case 'book_purchased':
+        await this.trackInteraction(recoClient, data, 'purchase', 10.0);
+        await this.invalidateRecommendations(recoClient, data.userId);
+        break;
+
+      case 'book_created':
+      case 'book_updated':
+        await this.syncBookVector(recoClient, data);
+        break;
+
+      default:
+        console.warn(`Unknown event type: ${event_type}`);
+    }
+  }
+
+  /**
+   * Enregistrer interaction utilisateur dans Recommendations DB
+   */
+  async trackInteraction(
+    recoClient: any,
+    data: any,
+    interactionType: string,
+    weight: number
+  ) {
+    await recoClient.query(`
+      INSERT INTO user_interactions (
+        user_id, book_id, interaction_type, interaction_weight, metadata, created_at, synced_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    `, [
+      data.userId,
+      data.bookId,
+      interactionType,
+      weight,
+      JSON.stringify(data.metadata || {}),
+      data.timestamp || new Date().toISOString()
+    ]);
+
+    console.log(`Tracked ${interactionType} for user ${data.userId}, book ${data.bookId}`);
+  }
+
+  /**
+   * Synchroniser métadonnées de livre
+   */
+  async syncBookVector(recoClient: any, bookData: any) {
+    // Générer embedding (simplifié - en prod utiliser ML model)
+    const contentVector = await this.generateBookEmbedding(bookData);
+
+    await recoClient.query(`
+      INSERT INTO book_vectors (
+        book_id, title, author, category, price, content_vector, synced_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      ON CONFLICT (book_id) DO UPDATE SET
+        title = EXCLUDED.title,
+        author = EXCLUDED.author,
+        category = EXCLUDED.category,
+        price = EXCLUDED.price,
+        content_vector = EXCLUDED.content_vector,
+        synced_at = NOW()
+    `, [
+      bookData.id,
+      bookData.title,
+      bookData.author,
+      bookData.category,
+      bookData.price,
+      JSON.stringify(contentVector)
+    ]);
+
+    console.log(`Synced book vector for book ${bookData.id}`);
+  }
+
+  /**
+   * Invalider recommandations en cache
+   */
+  async invalidateRecommendations(recoClient: any, userId: string) {
+    await recoClient.query(
+      'DELETE FROM user_recommendations WHERE user_id = $1',
+      [userId]
+    );
+  }
+
+  /**
+   * Générer embedding pour un livre (placeholder - utiliser ML en prod)
+   */
+  async generateBookEmbedding(bookData: any): Promise<number[]> {
+    // En production : appeler service ML (TensorFlow, PyTorch)
+    // Pour l'instant : embedding simple basé sur hash
+    const text = `${bookData.title} ${bookData.author} ${bookData.category}`;
+    const vector = new Array(128).fill(0).map((_, i) => {
+      return Math.sin(text.charCodeAt(i % text.length) * (i + 1)) * 0.5;
+    });
+    return vector;
+  }
+}
+
+// Entry point
+const syncWorker = new RecommendationsSyncWorker();
+syncWorker.start();
+```
+
+### Déploiement du Sync Worker
+
+```yaml
+# deployments/recommendations-sync-worker.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recommendations-sync-worker
+  namespace: bookstore
+spec:
+  replicas: 2 # HA avec SKIP LOCKED
+  selector:
+    matchLabels:
+      app: recommendations-sync-worker
+  template:
+    metadata:
+      labels:
+        app: recommendations-sync-worker
+        version: v1
+    spec:
+      nodeSelector:
+        workload.type: system
+
+      containers:
+      - name: sync-worker
+        image: bookstore/recommendations-sync-worker:latest
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "300m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+
+        env:
+        # Main DBaaS
+        - name: DBAAS_MAIN_HOST
+          valueFrom:
+            secretKeyRef:
+              name: dbaas-postgresql-main
+              key: host
+        - name: DBAAS_MAIN_USER
+          valueFrom:
+            secretKeyRef:
+              name: dbaas-postgresql-main
+              key: username
+        - name: DBAAS_MAIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: dbaas-postgresql-main
+              key: password
+
+        # Recommendations DBaaS
+        - name: DBAAS_RECO_HOST
+          valueFrom:
+            secretKeyRef:
+              name: dbaas-postgresql-recommendations
+              key: host
+        - name: DBAAS_RECO_USER
+          valueFrom:
+            secretKeyRef:
+              name: dbaas-postgresql-recommendations
+              key: username
+        - name: DBAAS_RECO_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: dbaas-postgresql-recommendations
+              key: password
+
+        volumeMounts:
+        - name: main-db-ca
+          mountPath: /etc/secrets/main-db-ca.crt
+          subPath: ca.crt
+        - name: reco-db-ca
+          mountPath: /etc/secrets/reco-db-ca.crt
+          subPath: ca.crt
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+      volumes:
+      - name: main-db-ca
+        secret:
+          secretName: dbaas-postgresql-main
+      - name: reco-db-ca
+        secret:
+          secretName: dbaas-postgresql-recommendations
+```
+
+### Service de recommandations
+
+```typescript
+// services/recommendation.service.ts
+import { recoDb, redisClient } from '../config/database';
+
+export class RecommendationService {
+  /**
+   * Obtenir recommandations personnalisées pour un utilisateur
+   */
+  async getPersonalizedRecommendations(userId: string, limit: number = 10) {
+    const cacheKey = `recommendations:${userId}`;
+
+    // 1. Check cache Redis
+    const cached = await redisClient.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+
+    // 2. Check cache dans Recommendations DB
+    const cachedReco = await recoDb.query(`
+      SELECT book_id, recommendation_score, recommendation_reason
+      FROM user_recommendations
+      WHERE user_id = $1 AND expires_at > NOW()
+      ORDER BY recommendation_score DESC
+      LIMIT $2
+    `, [userId, limit]);
+
+    if (cachedReco.rows.length >= limit) {
+      const recommendations = cachedReco.rows;
+      await redisClient.setEx(cacheKey, 1800, JSON.stringify(recommendations));
+      return recommendations;
+    }
+
+    // 3. Calculer nouvelles recommandations
+    const recommendations = await this.computeRecommendations(userId, limit);
+
+    // 4. Sauvegarder dans cache DB
+    for (const reco of recommendations) {
+      await recoDb.query(`
+        INSERT INTO user_recommendations (
+          user_id, book_id, recommendation_score, recommendation_reason, computed_at, expires_at
+        ) VALUES ($1, $2, $3, $4, NOW(), NOW() + INTERVAL '1 hour')
+        ON CONFLICT (user_id, book_id) DO UPDATE SET
+          recommendation_score = EXCLUDED.recommendation_score,
+          computed_at = NOW(),
+          expires_at = NOW() + INTERVAL '1 hour'
+      `, [userId, reco.book_id, reco.score, reco.reason]);
+    }
+
+    // 5. Cache Redis
+    await redisClient.setEx(cacheKey, 1800, JSON.stringify(recommendations));
+
+    return recommendations;
+  }
+
+  /**
+   * Calculer recommandations avec pgvector
+   */
+  async computeRecommendations(userId: string, limit: number) {
+    // 1. Obtenir vecteur de préférence utilisateur
+    const userVectorResult = await recoDb.query(
+      'SELECT preference_vector FROM user_vectors WHERE user_id = $1',
+      [userId]
+    );
+
+    if (userVectorResult.rows.length === 0) {
+      // Pas de vecteur - recommandations trending
+      return this.getTrendingRecommendations(limit);
+    }
+
+    const userVector = userVectorResult.rows[0].preference_vector;
+
+    // 2. Recherche cosine similarity avec pgvector
+    const result = await recoDb.query(`
+      SELECT
+        bv.book_id,
+        bv.title,
+        bv.author,
+        bv.category,
+        bv.price,
+        bv.popularity_score,
+        1 - (bv.content_vector <=> $1) as similarity_score
+      FROM book_vectors bv
+      WHERE bv.book_id NOT IN (
+        -- Exclure livres déjà achetés
+        SELECT book_id FROM user_interactions
+        WHERE user_id = $2 AND interaction_type = 'purchase'
+      )
+      ORDER BY bv.content_vector <=> $1
+      LIMIT $3
+    `, [JSON.stringify(userVector), userId, limit]);
+
+    return result.rows.map(row => ({
+      book_id: row.book_id,
+      title: row.title,
+      author: row.author,
+      category: row.category,
+      price: row.price,
+      score: row.similarity_score,
+      reason: 'Based on your preferences'
+    }));
+  }
+
+  /**
+   * Recommandations trending (fallback)
+   */
+  async getTrendingRecommendations(limit: number) {
+    const result = await recoDb.query(`
+      SELECT book_id, title, trend_score
+      FROM trending_books
+      ORDER BY trend_score DESC
+      LIMIT $1
+    `, [limit]);
+
+    return result.rows.map(row => ({
+      book_id: row.book_id,
+      title: row.title,
+      score: row.trend_score,
+      reason: 'Trending now'
+    }));
+  }
+
+  /**
+   * Obtenir livres similaires
+   */
+  async getSimilarBooks(bookId: string, limit: number = 5) {
+    const cacheKey = `similar:${bookId}`;
+
+    // Cache Redis
+    const cached = await redisClient.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+
+    // Query Recommendations DB
+    const result = await recoDb.query(`
+      SELECT sb.similar_book_id, sb.similarity_score, bv.title, bv.author
+      FROM similar_books sb
+      JOIN book_vectors bv ON sb.similar_book_id = bv.book_id
+      WHERE sb.book_id = $1
+      ORDER BY sb.similarity_score DESC
+      LIMIT $2
+    `, [bookId, limit]);
+
+    const similarBooks = result.rows;
+    await redisClient.setEx(cacheKey, 3600, JSON.stringify(similarBooks));
+
+    return similarBooks;
+  }
+}
+```
+
+### Calcul périodique des embeddings et trending
+
+```yaml
+# cronjobs/compute-recommendations.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: compute-user-vectors
+  namespace: bookstore
+spec:
+  schedule: "0 */6 * * *" # Toutes les 6 heures
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          nodeSelector:
+            workload.type: system
+          containers:
+          - name: compute
+            image: bookstore/recommendations-compute:latest
+            env:
+            - name: DBAAS_RECO_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: dbaas-postgresql-recommendations
+                  key: host
+            - name: COMPUTE_TYPE
+              value: "user_vectors"
+          restartPolicy: OnFailure
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: compute-trending
+  namespace: bookstore
+spec:
+  schedule: "*/30 * * * *" # Toutes les 30 minutes
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          nodeSelector:
+            workload.type: system
+          containers:
+          - name: compute
+            image: bookstore/recommendations-compute:latest
+            env:
+            - name: DBAAS_RECO_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: dbaas-postgresql-recommendations
+                  key: host
+            - name: COMPUTE_TYPE
+              value: "trending"
+          restartPolicy: OnFailure
+```
+
+### Workflow complet : Recommandations End-to-End
+
+```typescript
+// controllers/recommendation.controller.ts
+import { RecommendationService } from '../services/recommendation.service';
+
+export class RecommendationController {
+  private recoService = new RecommendationService();
+
+  /**
+   * Workflow complet :
+   * 1. User visite page livre
+   * 2. Event "book_viewed" écrit dans Main DB (outbox)
+   * 3. Sync Worker transfert vers Recommendations DB
+   * 4. CronJob calcule trending et user vectors
+   * 5. User demande recommandations
+   * 6. Service lit depuis Recommendations DB avec cache Redis
+   */
+  async getRecommendations(req: any, res: any) {
+    try {
+      const { userId } = req.params;
+      const limit = parseInt(req.query.limit || '10');
+
+      // Obtenir recommandations personnalisées
+      const recommendations = await this.recoService.getPersonalizedRecommendations(
+        userId,
+        limit
+      );
+
+      res.json({
+        userId,
+        recommendations,
+        cached: true,
+        source: 'dbaas-recommendations'
+      });
+
+    } catch (error) {
+      console.error('Error getting recommendations:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async getSimilarBooks(req: any, res: any) {
+    try {
+      const { bookId } = req.params;
+      const limit = parseInt(req.query.limit || '5');
+
+      const similarBooks = await this.recoService.getSimilarBooks(bookId, limit);
+
+      res.json({
+        bookId,
+        similarBooks,
+        source: 'dbaas-recommendations'
+      });
+
+    } catch (error) {
+      console.error('Error getting similar books:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+}
+```
+
+### Résumé du workflow de synchronisation
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ 1. User Action (view/purchase/search)                                │
+│    └─▶ Application écrit dans Main DB + Outbox event                │
+└──────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ 2. Recommendations Sync Worker (poll toutes les 10s)                 │
+│    └─▶ Poll Main DB outbox_events                                   │
+│    └─▶ Extrait événements pertinents                                │
+│    └─▶ Écrit dans Recommendations DB (user_interactions)            │
+│    └─▶ Marque événements comme traités                              │
+└──────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ 3. CronJobs périodiques                                              │
+│    └─▶ Compute User Vectors (toutes les 6h)                         │
+│    └─▶ Compute Trending Books (toutes les 30min)                    │
+│    └─▶ Compute Similar Books (nightly)                              │
+└──────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ 4. User demande recommandations                                      │
+│    └─▶ Check Redis cache (in-cluster, <1ms)                         │
+│    └─▶ Si miss : Check Recommendations DB cache                     │
+│    └─▶ Si miss : Compute avec pgvector cosine similarity            │
+│    └─▶ Cache résultat (Redis + DB)                                  │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Avantages de l'architecture 2 bases DBaaS
+
+1. **Isolation des workloads**
+   - Main DB : OLTP (transactions rapides)
+   - Recommendations DB : OLAP (requêtes analytiques complexes)
+
+2. **Scaling indépendant**
+   - Main DB : Scale pour volume de transactions
+   - Recommendations DB : Scale pour calculs ML
+
+3. **Performance**
+   - Indexes optimisés différemment
+   - Pas d'impact des calculs ML sur transactions
+
+4. **Coûts**
+   - Main DB : Instance plus petite (transactions only)
+   - Recommendations DB : Instance avec plus de CPU pour calculs
+
+### Coûts estimés
+
+| Composant | Configuration | Coût mensuel |
+|-----------|--------------|--------------|
+| DBaaS PostgreSQL Main | 4 vCPU, 8 GB RAM | $432 |
+| DBaaS PostgreSQL Recommendations | 4 vCPU, 8 GB RAM | $432 |
+| Redis Operator (LKE) | 3 nodes × 4GB | Inclus dans LKE |
+| OpenSearch Operator (LKE) | 3 nodes × 8GB | Inclus dans LKE |
+| **Total** | | **$864/mois** |
 
 ## Comparaison : Architecture 100% APL Core vs Hybride
 
