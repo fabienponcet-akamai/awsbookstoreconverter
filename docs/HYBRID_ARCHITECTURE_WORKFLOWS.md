@@ -1097,6 +1097,705 @@ async function checkOpenSearch() {
 }
 ```
 
+## Workflow 5.5 : Redis Bestsellers - Synchronisation depuis Main DB
+
+### Architecture du système de bestsellers
+
+Dans l'application AWS Bookstore originale, **Redis sert à stocker et servir les bestsellers** pour une performance optimale. Dans l'architecture hybride, ce pattern est conservé avec une synchronisation depuis DBaaS PostgreSQL Main.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    LKE Cluster (APL Core)                         │
+│                                                                   │
+│  ┌─────────────────┐          ┌────────────────────────┐        │
+│  │   Application   │◀─────────│   Redis In-Cluster     │        │
+│  │   (Knative)     │  < 1ms   │   (Operator)           │        │
+│  │                 │          │                         │        │
+│  │  GET /bestsell  │          │  Key: bestsellers      │        │
+│  └─────────────────┘          │  TTL: 5 minutes        │        │
+│                                │  Value: JSON array     │        │
+│                                └────────────────────────┘        │
+│                                          ▲                        │
+│                                          │ Sync every 5 min      │
+│                                          │                        │
+│                   ┌──────────────────────┴────────┐              │
+│                   │  Bestsellers Sync Worker      │              │
+│                   │  (CronJob / Deployment)       │              │
+│                   └──────────────────────┬────────┘              │
+└────────────────────────────────────────┼──────────────────────────┘
+                                          │
+                                          │ Query & Cache
+                                          ▼
+                    ┌────────────────────────────────────────┐
+                    │   DBaaS PostgreSQL Main                │
+                    │                                        │
+                    │   SELECT book_id, title, author,      │
+                    │          COUNT(*) as total_sales      │
+                    │   FROM orders                         │
+                    │   GROUP BY book_id                    │
+                    │   ORDER BY total_sales DESC           │
+                    │   LIMIT 100                           │
+                    └────────────────────────────────────────┘
+```
+
+### Workflow complet : Bestsellers
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ 1. CronJob s'exécute toutes les 5 minutes                        │
+│    └─▶ Déclenche le Bestsellers Sync Worker                     │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ 2. Worker query DBaaS PostgreSQL Main                            │
+│    └─▶ Calcul des bestsellers (agrégation sur orders)           │
+│    └─▶ Join avec books pour métadonnées complètes               │
+│    └─▶ Limite : Top 100 livres                                  │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ 3. Worker écrit dans Redis in-cluster                            │
+│    └─▶ Key: "bestsellers"                                       │
+│    └─▶ Value: JSON array avec top 100                           │
+│    └─▶ TTL: 5 minutes (expire avant le prochain sync)           │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ 4. Application Knative sert les bestsellers                      │
+│    └─▶ GET /api/bestsellers                                     │
+│    └─▶ Lecture Redis (< 1ms)                                    │
+│    └─▶ Aucune query vers PostgreSQL                             │
+│    └─▶ Performance optimale pour endpoint très sollicité        │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Schéma SQL : Vue matérialisée pour bestsellers
+
+```sql
+-- Base DBaaS PostgreSQL Main
+-- Vue matérialisée pour calcul optimisé des bestsellers
+
+CREATE MATERIALIZED VIEW bestsellers_mv AS
+SELECT
+  b.id as book_id,
+  b.title,
+  b.author,
+  b.category,
+  b.price,
+  b.cover_image_url,
+  COUNT(DISTINCT o.id) as total_orders,
+  SUM(o.quantity) as total_quantity_sold,
+  SUM(o.quantity * o.unit_price) as total_revenue,
+  MAX(o.created_at) as last_sale_date,
+  -- Score de bestseller (pondéré par récence)
+  (
+    SUM(o.quantity) * 1.0 +
+    COUNT(DISTINCT o.id) * 2.0 +
+    -- Bonus pour ventes récentes (derniers 7 jours)
+    SUM(
+      CASE
+        WHEN o.created_at > NOW() - INTERVAL '7 days' THEN o.quantity * 3.0
+        WHEN o.created_at > NOW() - INTERVAL '30 days' THEN o.quantity * 1.5
+        ELSE 0
+      END
+    )
+  ) as bestseller_score
+FROM books b
+INNER JOIN orders o ON b.id = o.book_id
+WHERE o.status = 'completed'
+  AND o.created_at > NOW() - INTERVAL '90 days'  -- Fenêtre de 90 jours
+GROUP BY b.id, b.title, b.author, b.category, b.price, b.cover_image_url
+HAVING COUNT(DISTINCT o.id) >= 5  -- Minimum 5 commandes
+ORDER BY bestseller_score DESC;
+
+-- Index pour performance
+CREATE UNIQUE INDEX idx_bestsellers_mv_book_id ON bestsellers_mv(book_id);
+CREATE INDEX idx_bestsellers_mv_score ON bestsellers_mv(bestseller_score DESC);
+
+-- Rafraîchir la vue (appelé par CronJob ou trigger)
+-- REFRESH MATERIALIZED VIEW CONCURRENTLY bestsellers_mv;
+```
+
+### Worker de synchronisation Redis
+
+```typescript
+// workers/bestsellers-sync.ts
+import { mainDb, redisClient } from '../config/database';
+
+export class BestsellersSync {
+  private syncInterval = 300000; // 5 minutes
+  private cacheKey = 'bestsellers';
+  private cacheTTL = 360; // 6 minutes (TTL > interval pour éviter cache miss)
+
+  async start() {
+    console.log('Bestsellers Sync Worker started');
+
+    // Sync immédiat au démarrage
+    await this.syncBestsellers();
+
+    // Sync périodique
+    setInterval(async () => {
+      await this.syncBestsellers();
+    }, this.syncInterval);
+  }
+
+  async syncBestsellers() {
+    const startTime = Date.now();
+    console.log('Starting bestsellers sync from DBaaS Main...');
+
+    try {
+      // 1. Query DBaaS PostgreSQL Main - Vue matérialisée
+      const result = await mainDb.query(`
+        SELECT
+          book_id,
+          title,
+          author,
+          category,
+          price,
+          cover_image_url,
+          total_orders,
+          total_quantity_sold,
+          total_revenue,
+          bestseller_score,
+          last_sale_date
+        FROM bestsellers_mv
+        ORDER BY bestseller_score DESC
+        LIMIT 100
+      `);
+
+      const bestsellers = result.rows;
+
+      if (bestsellers.length === 0) {
+        console.warn('No bestsellers found in Main DB');
+        return;
+      }
+
+      // 2. Préparer les données pour Redis
+      const bestsellersData = {
+        updated_at: new Date().toISOString(),
+        count: bestsellers.length,
+        books: bestsellers.map((book, index) => ({
+          rank: index + 1,
+          book_id: book.book_id,
+          title: book.title,
+          author: book.author,
+          category: book.category,
+          price: parseFloat(book.price),
+          cover_image_url: book.cover_image_url,
+          total_orders: parseInt(book.total_orders),
+          total_quantity_sold: parseInt(book.total_quantity_sold),
+          total_revenue: parseFloat(book.total_revenue),
+          bestseller_score: parseFloat(book.bestseller_score),
+          last_sale_date: book.last_sale_date
+        }))
+      };
+
+      // 3. Écrire dans Redis in-cluster (atomic)
+      await redisClient.setEx(
+        this.cacheKey,
+        this.cacheTTL,
+        JSON.stringify(bestsellersData)
+      );
+
+      const duration = Date.now() - startTime;
+      console.log(`✅ Bestsellers sync completed in ${duration}ms - ${bestsellers.length} books cached`);
+
+      // 4. Également créer des caches par catégorie
+      await this.syncBestsellersByCategory(bestsellers);
+
+    } catch (error) {
+      console.error('❌ Error syncing bestsellers:', error);
+      // Ne pas throw - le prochain sync réessaiera
+    }
+  }
+
+  /**
+   * Cache bestsellers par catégorie pour filtrage rapide
+   */
+  async syncBestsellersByCategory(bestsellers: any[]) {
+    const categoriesMap = new Map<string, any[]>();
+
+    // Grouper par catégorie
+    bestsellers.forEach(book => {
+      const category = book.category || 'uncategorized';
+      if (!categoriesMap.has(category)) {
+        categoriesMap.set(category, []);
+      }
+      categoriesMap.get(category)!.push(book);
+    });
+
+    // Écrire un cache par catégorie (top 20 par catégorie)
+    for (const [category, books] of categoriesMap) {
+      const cacheKey = `bestsellers:category:${category.toLowerCase().replace(/\s+/g, '-')}`;
+      const categoryBestsellers = {
+        category,
+        updated_at: new Date().toISOString(),
+        count: Math.min(books.length, 20),
+        books: books.slice(0, 20).map((book, index) => ({
+          rank: index + 1,
+          ...book
+        }))
+      };
+
+      await redisClient.setEx(
+        cacheKey,
+        this.cacheTTL,
+        JSON.stringify(categoryBestsellers)
+      );
+    }
+
+    console.log(`✅ Cached bestsellers for ${categoriesMap.size} categories`);
+  }
+
+  /**
+   * Rafraîchir la vue matérialisée (appelé avant le sync)
+   */
+  async refreshMaterializedView() {
+    try {
+      console.log('Refreshing bestsellers materialized view...');
+      await mainDb.query('REFRESH MATERIALIZED VIEW CONCURRENTLY bestsellers_mv');
+      console.log('✅ Materialized view refreshed');
+    } catch (error) {
+      console.error('❌ Error refreshing materialized view:', error);
+      // Continue anyway - utilise les données existantes
+    }
+  }
+}
+
+// Entry point
+const syncWorker = new BestsellersSync();
+
+// Optionnel : Rafraîchir la vue matérialisée avant le premier sync
+syncWorker.refreshMaterializedView().then(() => {
+  syncWorker.start();
+});
+```
+
+### Service Application : Lecture bestsellers depuis Redis
+
+```typescript
+// services/bestseller.service.ts
+import { redisClient, mainDb } from '../config/database';
+
+export class BestsellerService {
+  /**
+   * Obtenir les bestsellers depuis Redis (cache chaud)
+   */
+  async getBestsellers(limit: number = 100) {
+    try {
+      // 1. Lecture depuis Redis in-cluster (< 1ms)
+      const cached = await redisClient.get('bestsellers');
+
+      if (cached) {
+        const data = JSON.parse(cached);
+        console.log(`✅ Bestsellers served from Redis cache (${data.count} books)`);
+
+        return {
+          ...data,
+          books: data.books.slice(0, limit), // Limiter si demandé
+          source: 'redis-cache'
+        };
+      }
+
+      // 2. Cache miss (ne devrait jamais arriver si le worker fonctionne)
+      console.warn('⚠️ Bestsellers cache miss - falling back to DB');
+      return await this.getBestsellersFromDB(limit);
+
+    } catch (error) {
+      console.error('❌ Error getting bestsellers from Redis:', error);
+      // Fallback vers DB
+      return await this.getBestsellersFromDB(limit);
+    }
+  }
+
+  /**
+   * Fallback : Query directe depuis DBaaS (lent, à éviter)
+   */
+  private async getBestsellersFromDB(limit: number = 100) {
+    const result = await mainDb.query(`
+      SELECT
+        book_id, title, author, category, price,
+        cover_image_url, total_orders, total_quantity_sold,
+        bestseller_score
+      FROM bestsellers_mv
+      ORDER BY bestseller_score DESC
+      LIMIT $1
+    `, [limit]);
+
+    return {
+      updated_at: new Date().toISOString(),
+      count: result.rows.length,
+      books: result.rows.map((book, index) => ({
+        rank: index + 1,
+        ...book
+      })),
+      source: 'database-fallback'
+    };
+  }
+
+  /**
+   * Bestsellers par catégorie
+   */
+  async getBestsellersByCategory(category: string, limit: number = 20) {
+    const cacheKey = `bestsellers:category:${category.toLowerCase().replace(/\s+/g, '-')}`;
+
+    try {
+      const cached = await redisClient.get(cacheKey);
+      if (cached) {
+        const data = JSON.parse(cached);
+        return {
+          ...data,
+          books: data.books.slice(0, limit),
+          source: 'redis-cache'
+        };
+      }
+    } catch (error) {
+      console.error('Error getting category bestsellers from Redis:', error);
+    }
+
+    // Fallback : filtrer depuis le cache global
+    const allBestsellers = await this.getBestsellers(100);
+    const categoryBooks = allBestsellers.books
+      .filter((book: any) => book.category === category)
+      .slice(0, limit);
+
+    return {
+      category,
+      updated_at: new Date().toISOString(),
+      count: categoryBooks.length,
+      books: categoryBooks,
+      source: 'filtered-from-cache'
+    };
+  }
+
+  /**
+   * Statistiques temps réel pour un livre
+   */
+  async getBookStats(bookId: string) {
+    const cacheKey = `book:stats:${bookId}`;
+
+    // Check cache court (1 minute)
+    const cached = await redisClient.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+
+    // Query stats depuis DBaaS
+    const result = await mainDb.query(`
+      SELECT
+        b.id,
+        b.title,
+        COUNT(DISTINCT o.id) as total_orders,
+        SUM(o.quantity) as total_sold,
+        AVG(o.unit_price) as avg_price,
+        MAX(o.created_at) as last_sale
+      FROM books b
+      LEFT JOIN orders o ON b.id = o.book_id AND o.status = 'completed'
+      WHERE b.id = $1
+      GROUP BY b.id, b.title
+    `, [bookId]);
+
+    if (result.rows.length === 0) {
+      return null;
+    }
+
+    const stats = result.rows[0];
+
+    // Cache court (1 minute)
+    await redisClient.setEx(cacheKey, 60, JSON.stringify(stats));
+
+    return stats;
+  }
+}
+```
+
+### API Controller
+
+```typescript
+// controllers/bestseller.controller.ts
+import { BestsellerService } from '../services/bestseller.service';
+
+export class BestsellerController {
+  private bestsellerService = new BestsellerService();
+
+  /**
+   * GET /api/bestsellers
+   * Endpoint ultra-rapide servi depuis Redis
+   */
+  async getBestsellers(req: any, res: any) {
+    try {
+      const limit = parseInt(req.query.limit || '100');
+      const bestsellers = await this.bestsellerService.getBestsellers(limit);
+
+      res.json({
+        success: true,
+        data: bestsellers,
+        cached: bestsellers.source === 'redis-cache'
+      });
+
+    } catch (error) {
+      console.error('Error getting bestsellers:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  /**
+   * GET /api/bestsellers/category/:category
+   */
+  async getBestsellersByCategory(req: any, res: any) {
+    try {
+      const { category } = req.params;
+      const limit = parseInt(req.query.limit || '20');
+
+      const bestsellers = await this.bestsellerService.getBestsellersByCategory(
+        category,
+        limit
+      );
+
+      res.json({
+        success: true,
+        data: bestsellers
+      });
+
+    } catch (error) {
+      console.error('Error getting category bestsellers:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  /**
+   * GET /api/books/:bookId/stats
+   */
+  async getBookStats(req: any, res: any) {
+    try {
+      const { bookId } = req.params;
+      const stats = await this.bestsellerService.getBookStats(bookId);
+
+      if (!stats) {
+        return res.status(404).json({ error: 'Book not found' });
+      }
+
+      res.json({
+        success: true,
+        data: stats
+      });
+
+    } catch (error) {
+      console.error('Error getting book stats:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+}
+```
+
+### Déploiement Kubernetes : CronJob + Deployment
+
+```yaml
+# deployments/bestsellers-sync-worker.yaml
+
+# Option 1 : CronJob (sync toutes les 5 minutes)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: bestsellers-sync
+  namespace: bookstore
+spec:
+  schedule: "*/5 * * * *"  # Toutes les 5 minutes
+  concurrencyPolicy: Forbid  # Ne pas lancer si le précédent n'est pas terminé
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          nodeSelector:
+            workload.type: system
+
+          containers:
+          - name: sync-worker
+            image: bookstore/bestsellers-sync:latest
+            resources:
+              requests:
+                memory: "128Mi"
+                cpu: "100m"
+              limits:
+                memory: "256Mi"
+                cpu: "200m"
+
+            env:
+            # DBaaS PostgreSQL Main
+            - name: DBAAS_MAIN_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: dbaas-postgresql-main
+                  key: host
+            - name: DBAAS_MAIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: dbaas-postgresql-main
+                  key: username
+            - name: DBAAS_MAIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dbaas-postgresql-main
+                  key: password
+
+            # Redis in-cluster
+            - name: REDIS_HOST
+              value: "bookstore-redis-cluster.stateful.svc.cluster.local"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: password
+
+            volumeMounts:
+            - name: db-ca-cert
+              mountPath: /etc/secrets/db-ca.crt
+              subPath: ca.crt
+
+          volumes:
+          - name: db-ca-cert
+            secret:
+              secretName: dbaas-postgresql-main
+
+          restartPolicy: OnFailure
+---
+# Option 2 : Deployment avec boucle infinie (alternative au CronJob)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bestsellers-sync-daemon
+  namespace: bookstore
+spec:
+  replicas: 1  # Un seul worker pour éviter les conflits
+  selector:
+    matchLabels:
+      app: bestsellers-sync-daemon
+  template:
+    metadata:
+      labels:
+        app: bestsellers-sync-daemon
+        version: v1
+    spec:
+      nodeSelector:
+        workload.type: system
+
+      containers:
+      - name: sync-daemon
+        image: bookstore/bestsellers-sync:latest
+        command: ["node", "dist/workers/bestsellers-sync-daemon.js"]  # Boucle infinie
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+
+        env:
+        - name: SYNC_INTERVAL_MS
+          value: "300000"  # 5 minutes
+        - name: DBAAS_MAIN_HOST
+          valueFrom:
+            secretKeyRef:
+              name: dbaas-postgresql-main
+              key: host
+        - name: REDIS_HOST
+          value: "bookstore-redis-cluster.stateful.svc.cluster.local"
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+```
+
+### Métriques et monitoring
+
+```typescript
+// monitoring/bestsellers-metrics.ts
+import { Counter, Histogram, Gauge } from 'prom-client';
+
+export const bestsellersSyncDuration = new Histogram({
+  name: 'bestsellers_sync_duration_seconds',
+  help: 'Duration of bestsellers sync from Main DB to Redis',
+  buckets: [0.1, 0.5, 1, 2, 5, 10]
+});
+
+export const bestsellersSyncErrors = new Counter({
+  name: 'bestsellers_sync_errors_total',
+  help: 'Total number of bestsellers sync errors',
+  labelNames: ['error_type']
+});
+
+export const bestsellersCacheSize = new Gauge({
+  name: 'bestsellers_cache_size',
+  help: 'Number of bestsellers in Redis cache'
+});
+
+export const bestsellersApiRequests = new Counter({
+  name: 'bestsellers_api_requests_total',
+  help: 'Total number of bestsellers API requests',
+  labelNames: ['endpoint', 'cache_hit']
+});
+
+export const bestsellersApiLatency = new Histogram({
+  name: 'bestsellers_api_latency_seconds',
+  help: 'Latency of bestsellers API requests',
+  labelNames: ['endpoint', 'cache_hit'],
+  buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5]
+});
+```
+
+### Avantages de cette architecture
+
+1. **Performance exceptionnelle**
+   - Lecture Redis : < 1ms (vs ~50ms query DB)
+   - Endpoint bestsellers peut gérer 10,000+ req/s
+
+2. **Scalabilité**
+   - Redis in-cluster scale horizontalement
+   - Pas de charge sur DBaaS pour lectures bestsellers
+
+3. **Résilience**
+   - Fallback automatique vers DB si Redis indisponible
+   - TTL > intervalle de sync (pas de cache miss)
+
+4. **Coûts optimisés**
+   - Réduction drastique des queries vers DBaaS Main
+   - Redis in-cluster (gratuit, inclus dans LKE nodes)
+
+5. **Flexibilité**
+   - Vue matérialisée SQL personnalisable
+   - Score de bestseller pondéré par récence
+   - Cache multi-niveaux (global + par catégorie)
+
+### Comparaison avec AWS Bookstore original
+
+| Aspect | AWS Bookstore | Architecture Hybride APL/LKE |
+|--------|---------------|------------------------------|
+| **Redis** | ElastiCache | Redis Operator (in-cluster) |
+| **Source de données** | DynamoDB | DBaaS PostgreSQL (vue matérialisée) |
+| **Sync** | Lambda + DynamoDB Streams | CronJob Kubernetes |
+| **Latence lecture** | < 1ms | < 1ms (identique) |
+| **Coût Redis** | $50+/mois | $0 (inclus dans nodes) |
+| **Calcul bestsellers** | Lambda + DynamoDB scan | PostgreSQL MATERIALIZED VIEW (optimisé) |
+| **Fallback** | Aucun | Fallback automatique vers DB |
+
 ## Workflow 6 : Système de Recommandations avec DBaaS PostgreSQL
 
 ### Architecture du système de recommandations
