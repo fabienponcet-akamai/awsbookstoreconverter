@@ -9,7 +9,7 @@ These scripts facilitate the migration of all AWS Bookstore data to the new CNCF
 | Script | Purpose | Input | Output |
 |--------|---------|-------|--------|
 | **transform_dynamodb_to_sql.py** | DynamoDB → PostgreSQL | DynamoDB JSON export | SQL statements |
-| **neptune_to_age.py** | Neptune Graph → Apache AGE | CSV (vertices, edges) | Direct DB import |
+| **neptune_to_postgres.py** | Neptune Graph → PostgreSQL | CSV (vertices, edges) | Direct DB import |
 | **cognito_to_keycloak.py** | Cognito Users → Keycloak | Cognito JSON export | Keycloak JSON import |
 | **validate_migration.sh** | Validate migration | - | Validation report |
 
@@ -116,7 +116,7 @@ kubectl exec -n bookstore bookstore-main-1 -- \
 
 ---
 
-## 2. Neptune → Apache AGE Migration
+## 2. Neptune → PostgreSQL Relational Migration
 
 ### Step 1: Export from Neptune
 
@@ -137,32 +137,33 @@ aws neptune-data export-graph \
 aws s3 sync s3://bookstore-migration/neptune-export/ ./data/neptune/
 ```
 
-### Step 2: Import to Apache AGE
+### Step 2: Import to PostgreSQL
 
 ```bash
 # Set PostgreSQL password
-export POSTGRES_PASSWORD=$(kubectl get secret -n bookstore bookstore-graph-superuser \
+export PGPASSWORD=$(kubectl get secret -n bookstore bookstore-graph-credentials \
   -o jsonpath='{.data.password}' | base64 -d)
 
 # Run migration
-python neptune_to_age.py \
+python neptune_to_postgres.py \
   --vertices ./data/neptune/vertices.csv \
   --edges ./data/neptune/edges.csv \
   --db-host bookstore-graph-rw.bookstore.svc.cluster.local \
   --db-name bookstore_graph \
-  --graph-name recommendations
+  --db-user bookstore
 
 # Verify
 kubectl exec -n bookstore bookstore-graph-1 -- \
-  psql -U postgres -d bookstore_graph -c \
-  "SELECT * FROM cypher('recommendations', \$\$ MATCH (n) RETURN count(n) \$\$) as (count agtype);"
+  psql -U bookstore -d bookstore_graph -c \
+  "SELECT COUNT(*) FROM graph_users; SELECT COUNT(*) FROM graph_books; SELECT COUNT(*) FROM graph_purchases;"
 ```
 
 **Notes:**
 
-- The script automatically converts Gremlin graph structure to Cypher
-- Handles vertex/edge properties and labels
-- Creates the graph if it doesn't exist
+- The script converts Neptune graph vertices to relational tables (graph_users, graph_books)
+- Edges are converted to relationship tables (graph_purchases, graph_ratings)
+- Uses standard PostgreSQL features for collaborative filtering recommendations
+- No special extensions required beyond standard PostgreSQL
 
 ---
 
@@ -271,14 +272,16 @@ export AWS_COGNITO_POOL=us-east-1_XXXXXXXXX
 ✅ Books count matches AWS DynamoDB
 ✅ Data sampling successful
 
-2. Validating Apache AGE Graph Database
+2. Validating PostgreSQL Graph Database
 ----------------------------------------
 ✅ PostgreSQL graph pod found
-✅ Apache AGE extension installed
-ℹ️  Graph vertices count: 2456
-✅ Graph has 2456 vertices
-ℹ️  Graph edges count: 8932
-✅ Graph has 8932 edges
+✅ Graph schema tables exist
+ℹ️  Graph users count: 487
+✅ Graph has 487 users
+ℹ️  Graph books count: 1523
+✅ Graph has 1523 books
+ℹ️  Graph purchases count: 8932
+✅ Graph has 8932 purchases
 
 3. Validating Full-Text Search
 ----------------------------------------
@@ -364,15 +367,19 @@ jq -c '.users[]' keycloak-users.json | while read user; do
 done
 ```
 
-### AGE Graph Query Fails
+### Graph Recommendation Query Slow
 
-**Problem:** Cypher queries timeout or fail
+**Problem:** Recommendation queries timeout or are slow
 
-**Solution:** Increase statement timeout
+**Solution:** Ensure indexes are created and analyze tables
 
 ```bash
 kubectl exec -n bookstore bookstore-graph-1 -- \
-  psql -U postgres -d bookstore_graph -c "SET statement_timeout = '1h';"
+  psql -U bookstore -d bookstore_graph -c "
+    ANALYZE graph_users;
+    ANALYZE graph_books;
+    ANALYZE graph_purchases;
+  "
 ```
 
 ---
@@ -423,7 +430,7 @@ kubectl logs -n bookstore bookstore-main-1 -f | grep INSERT
 - [ ] Transform DynamoDB JSON to SQL
 - [ ] Import to CloudNative-PG
 - [ ] Export Neptune graph
-- [ ] Import to Apache AGE
+- [ ] Import to PostgreSQL graph database
 - [ ] Export Cognito users
 - [ ] Import to Keycloak
 - [ ] Sync S3 to Object Storage

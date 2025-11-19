@@ -155,17 +155,14 @@ resource "kubectl_manifest" "graph_database" {
           effective_cache_size: "2GB"
           work_mem: "16MB"
           maintenance_work_mem: "256MB"
-          # Apache AGE requirements
-          shared_preload_libraries: "age"
 
       bootstrap:
         initdb:
           database: ${var.graph_db_name}
           owner: ${var.graph_db_user}
           postInitSQL:
-            - CREATE EXTENSION IF NOT EXISTS age;
-            - LOAD 'age';
-            - SET search_path = ag_catalog, "$user", public;
+            - CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+            - CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
 
       storage:
         size: ${var.graph_db_storage}

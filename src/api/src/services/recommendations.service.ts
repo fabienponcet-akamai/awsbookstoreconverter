@@ -35,7 +35,7 @@ export interface UserPurchase {
 
 export class RecommendationsService {
   /**
-   * Get personalized book recommendations for a user using Apache AGE graph database
+   * Get personalized book recommendations for a user using collaborative filtering
    */
   async getRecommendations(userId: string, limit: number = 10): Promise<BookRecommendation[]> {
     try {
@@ -165,34 +165,14 @@ export class RecommendationsService {
 
   /**
    * Get trending books based on recent purchases
-   * Custom Cypher query
    */
   async getTrendingBooks(days: number = 7, limit: number = 10): Promise<BookRecommendation[]> {
     try {
       logger.info(`Getting trending books for last ${days} days`);
 
-      // Calculate the date threshold
-      const dateThreshold = new Date();
-      dateThreshold.setDate(dateThreshold.getDate() - days);
-
       const result = await graphPool.query(
-        `SELECT
-           (book->>'id')::TEXT as book_id,
-           (book->>'title')::TEXT as book_title,
-           (book->>'author')::TEXT as book_author,
-           (book->>'isbn')::TEXT as book_isbn,
-           count::BIGINT as score
-         FROM cypher('social_network', $$
-           MATCH (u:User)-[p:PURCHASED]->(book:Book)
-           WHERE p.timestamp > $date_threshold
-           RETURN book, COUNT(*) as count
-           ORDER BY count DESC
-           LIMIT $limit
-         $$, $${
-           "date_threshold": $1::text,
-           "limit": $2
-         }$$::agtype) as (book agtype, count agtype)`,
-        [dateThreshold.toISOString(), limit]
+        `SELECT * FROM graph_get_trending_books($1, $2)`,
+        [days, limit]
       );
 
       return result.rows.map(row => ({
@@ -200,7 +180,7 @@ export class RecommendationsService {
         title: row.book_title,
         author: row.book_author,
         isbn: row.book_isbn,
-        score: parseInt(row.score, 10)
+        score: parseInt(row.purchase_count, 10)
       }));
     } catch (error) {
       logger.error('Error getting trending books:', error);
@@ -217,23 +197,7 @@ export class RecommendationsService {
       logger.info(`Getting similar books for: ${bookId}`);
 
       const result = await graphPool.query(
-        `SELECT
-           (rec->>'id')::TEXT as book_id,
-           (rec->>'title')::TEXT as book_title,
-           (rec->>'author')::TEXT as book_author,
-           (rec->>'isbn')::TEXT as book_isbn,
-           count::BIGINT as score
-         FROM cypher('social_network', $$
-           MATCH (book:Book {id: $book_id})<-[:PURCHASED]-(u:User)
-                 -[:PURCHASED]->(rec:Book)
-           WHERE book.id <> rec.id
-           RETURN rec, COUNT(DISTINCT u) as count
-           ORDER BY count DESC
-           LIMIT $limit
-         $$, $${
-           "book_id": $1,
-           "limit": $2
-         }$$::agtype) as (rec agtype, count agtype)`,
+        `SELECT * FROM graph_get_similar_books($1, $2)`,
         [bookId, limit]
       );
 
@@ -242,7 +206,7 @@ export class RecommendationsService {
         title: row.book_title,
         author: row.book_author,
         isbn: row.book_isbn,
-        score: parseInt(row.score, 10)
+        score: parseInt(row.similarity_score, 10)
       }));
     } catch (error) {
       logger.error(`Error getting similar books for ${bookId}:`, error);
