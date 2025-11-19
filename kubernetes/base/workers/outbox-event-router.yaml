@@ -1,14 +1,14 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: graph-outbox-worker
+  name: outbox-event-router
   namespace: bookstore
   labels:
     app: bookstore
-    component: graph-outbox-worker
+    component: outbox-event-router
     tier: workers
 spec:
-  replicas: 2  # Run 2 instances for high availability
+  replicas: 2  # Run 2 instances for high availability (SKIP LOCKED prevents conflicts)
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -17,20 +17,20 @@ spec:
   selector:
     matchLabels:
       app: bookstore
-      component: graph-outbox-worker
+      component: outbox-event-router
   template:
     metadata:
       labels:
         app: bookstore
-        component: graph-outbox-worker
+        component: outbox-event-router
         tier: workers
       annotations:
-        prometheus.io/scrape: "false"  # No metrics yet, can add later
+        prometheus.io/scrape: "false"  # Can add Prometheus metrics later
     spec:
       serviceAccountName: bookstore-api
 
       containers:
-      - name: worker
+      - name: router
         image: bookstore-api:latest  # Same image as API, different entry point
         imagePullPolicy: Always
 
@@ -38,14 +38,14 @@ spec:
         args: ["dist/workers/index.js"]
 
         env:
-        # Managed DBaaS connection
+        # Managed DBaaS connection (source of outbox events)
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
               name: bookstore-db-credentials
               key: connection-string
 
-        # CloudNativePG/AGE cluster connection
+        # CloudNativePG/AGE cluster connection (for recommendations)
         - name: GRAPH_DATABASE_URL
           value: "postgresql://$(GRAPH_DB_USER):$(GRAPH_DB_PASSWORD)@bookstore-graph-rw.bookstore.svc.cluster.local:5432/bookstore_graph"
 
@@ -61,6 +61,36 @@ spec:
               name: bookstore-graph-credentials
               key: password
 
+        # Redis connection (for bestsellers)
+        - name: REDIS_URL
+          value: "redis://bookstore-redis-cluster.bookstore.svc.cluster.local:6379"
+
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-credentials
+              key: password
+              optional: true
+
+        # OpenSearch connection (for full-text search)
+        - name: OPENSEARCH_URL
+          value: "https://bookstore-search-master.bookstore.svc.cluster.local:9200"
+
+        - name: OPENSEARCH_USER
+          valueFrom:
+            secretKeyRef:
+              name: opensearch-credentials
+              key: username
+              optional: true
+
+        - name: OPENSEARCH_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: opensearch-credentials
+              key: password
+              optional: true
+
+        # Worker configuration
         - name: NODE_ENV
           value: "production"
 
@@ -73,13 +103,16 @@ spec:
         - name: HEALTH_CHECK_PORT
           value: "8080"
 
+        - name: POLL_INTERVAL_MS
+          value: "1000"  # Poll every 1 second
+
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "200m"
+            memory: "512Mi"  # More memory for multiple handlers
+            cpu: "300m"
           limits:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: "1Gi"
+            cpu: "1000m"
 
         ports:
         - name: health
@@ -97,7 +130,7 @@ spec:
 
         readinessProbe:
           httpGet:
-            path: /health
+            path: /ready
             port: health
           initialDelaySeconds: 10
           periodSeconds: 5
@@ -123,24 +156,28 @@ spec:
                 - key: component
                   operator: In
                   values:
-                  - graph-outbox-worker
+                  - outbox-event-router
               topologyKey: kubernetes.io/hostname
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: graph-outbox-worker
+  name: outbox-event-router
   namespace: bookstore
   labels:
     app: bookstore
-    component: graph-outbox-worker
+    component: outbox-event-router
 spec:
   selector:
     app: bookstore
-    component: graph-outbox-worker
+    component: outbox-event-router
   ports:
   - name: health
     port: 8080
+    targetPort: health
+    protocol: TCP
+  - name: stats
+    port: 8081
     targetPort: health
     protocol: TCP
   type: ClusterIP
@@ -148,11 +185,11 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: graph-outbox-worker
+  name: outbox-event-router
   namespace: bookstore
 spec:
-  minAvailable: 1
+  minAvailable: 1  # Always keep at least 1 instance running
   selector:
     matchLabels:
       app: bookstore
-      component: graph-outbox-worker
+      component: outbox-event-router
