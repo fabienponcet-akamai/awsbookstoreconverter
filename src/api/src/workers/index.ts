@@ -20,7 +20,7 @@
 
 import { outboxEventRouter } from './outbox-event-router';
 import { SearchSyncHandler } from './handlers/search-sync.handler';
-import { RecommendationsSyncHandler } from './handlers/recommendations-sync.handler';
+import { Neo4jRecommendationsHandler } from './handlers/neo4j-recommendations.handler';
 import { BestsellersUpdateHandler } from './handlers/bestsellers-update.handler';
 import { createLogger } from '../utils/logger';
 
@@ -32,7 +32,7 @@ async function main() {
   logger.info('='.repeat(60));
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
   logger.info(`Managed DB: ${process.env.DATABASE_URL ? '✓' : '✗'}`);
-  logger.info(`Graph DB: ${process.env.GRAPH_DATABASE_URL ? '✓' : '✗'}`);
+  logger.info(`Neo4j: ${process.env.NEO4J_URI ? '✓' : '✗'}`);
   logger.info(`Poll Interval: ${process.env.POLL_INTERVAL_MS || 1000}ms`);
   logger.info('='.repeat(60));
 
@@ -42,8 +42,8 @@ async function main() {
     process.exit(1);
   }
 
-  if (!process.env.GRAPH_DATABASE_URL) {
-    logger.error('GRAPH_DATABASE_URL environment variable is required');
+  if (!process.env.NEO4J_URI) {
+    logger.error('NEO4J_URI environment variable is required');
     process.exit(1);
   }
 
@@ -52,7 +52,7 @@ async function main() {
     logger.info('📝 Registering event handlers...');
 
     outboxEventRouter.registerHandler(new SearchSyncHandler());
-    outboxEventRouter.registerHandler(new RecommendationsSyncHandler());
+    outboxEventRouter.registerHandler(new Neo4jRecommendationsHandler());
     outboxEventRouter.registerHandler(new BestsellersUpdateHandler());
 
     logger.info('');

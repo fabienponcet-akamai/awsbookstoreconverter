@@ -45,20 +45,17 @@ spec:
               name: bookstore-db-credentials
               key: connection-string
 
-        # CloudNativePG/AGE cluster connection (for recommendations)
-        - name: GRAPH_DATABASE_URL
-          value: "postgresql://$(GRAPH_DB_USER):$(GRAPH_DB_PASSWORD)@bookstore-graph-rw.bookstore.svc.cluster.local:5432/bookstore_graph"
+        # Neo4j connection (for recommendations)
+        - name: NEO4J_URI
+          value: "bolt://bookstore-graph:7687"
 
-        - name: GRAPH_DB_USER
+        - name: NEO4J_USERNAME
+          value: "neo4j"
+
+        - name: NEO4J_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: bookstore-graph-credentials
-              key: username
-
-        - name: GRAPH_DB_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: bookstore-graph-credentials
+              name: neo4j-credentials
               key: password
 
         # Redis connection (for bestsellers)
