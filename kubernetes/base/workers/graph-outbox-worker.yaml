@@ -1,0 +1,158 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: graph-outbox-worker
+  namespace: bookstore
+  labels:
+    app: bookstore
+    component: graph-outbox-worker
+    tier: workers
+spec:
+  replicas: 2  # Run 2 instances for high availability
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: bookstore
+      component: graph-outbox-worker
+  template:
+    metadata:
+      labels:
+        app: bookstore
+        component: graph-outbox-worker
+        tier: workers
+      annotations:
+        prometheus.io/scrape: "false"  # No metrics yet, can add later
+    spec:
+      serviceAccountName: bookstore-api
+
+      containers:
+      - name: worker
+        image: bookstore-api:latest  # Same image as API, different entry point
+        imagePullPolicy: Always
+
+        command: ["node"]
+        args: ["dist/workers/index.js"]
+
+        env:
+        # Managed DBaaS connection
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: bookstore-db-credentials
+              key: connection-string
+
+        # CloudNativePG/AGE cluster connection
+        - name: GRAPH_DATABASE_URL
+          value: "postgresql://$(GRAPH_DB_USER):$(GRAPH_DB_PASSWORD)@bookstore-graph-rw.bookstore.svc.cluster.local:5432/bookstore_graph"
+
+        - name: GRAPH_DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: bookstore-graph-credentials
+              key: username
+
+        - name: GRAPH_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: bookstore-graph-credentials
+              key: password
+
+        - name: NODE_ENV
+          value: "production"
+
+        - name: LOG_LEVEL
+          value: "info"
+
+        - name: ENABLE_HEALTH_CHECK
+          value: "true"
+
+        - name: HEALTH_CHECK_PORT
+          value: "8080"
+
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+        ports:
+        - name: health
+          containerPort: 8080
+          protocol: TCP
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: health
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: health
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+
+        # Graceful shutdown
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 10"]
+
+      terminationGracePeriodSeconds: 30
+
+      # Pod anti-affinity to spread across nodes
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: component
+                  operator: In
+                  values:
+                  - graph-outbox-worker
+              topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: graph-outbox-worker
+  namespace: bookstore
+  labels:
+    app: bookstore
+    component: graph-outbox-worker
+spec:
+  selector:
+    app: bookstore
+    component: graph-outbox-worker
+  ports:
+  - name: health
+    port: 8080
+    targetPort: health
+    protocol: TCP
+  type: ClusterIP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: graph-outbox-worker
+  namespace: bookstore
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: bookstore
+      component: graph-outbox-worker

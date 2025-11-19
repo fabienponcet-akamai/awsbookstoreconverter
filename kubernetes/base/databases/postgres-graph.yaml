@@ -30,8 +30,10 @@ spec:
     pg_hba:
       - host all all all scram-sha-256
 
-  # Standard PostgreSQL image (no custom extensions required)
-  imageName: postgres:15
+  # Custom PostgreSQL image with Apache AGE extension
+  # Note: You'll need to build a custom image or use a pre-built one with AGE
+  # Example: ghcr.io/apache/age:PG15_latest
+  imageName: apache/age:PG15_latest
 
   # Bootstrap configuration
   bootstrap:
@@ -42,9 +44,18 @@ spec:
         name: bookstore-graph-credentials
       postInitApplicationSQL:
         - |
-          -- Standard PostgreSQL extensions for recommendation system
-          CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-          CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
+          -- Apache AGE extension installation
+          CREATE EXTENSION IF NOT EXISTS age;
+
+          -- Load AGE into the search path
+          SET search_path = ag_catalog, "$user", public;
+
+          -- Create the social network graph
+          SELECT create_graph('social_network');
+
+          -- Create indexes for better performance
+          CREATE INDEX IF NOT EXISTS idx_ag_label_vertex_label_id
+            ON ag_catalog.ag_label (label, id);
 
   # Storage configuration
   storage:
@@ -97,9 +108,49 @@ metadata:
   namespace: bookstore
 data:
   init-graph.sql: |
-    -- Relational Recommendation Database Initialization
-    -- Standard PostgreSQL schema for collaborative filtering
+    -- Apache AGE Graph Database Initialization
+    -- This database is synced from managed DBaaS via outbox pattern
 
-    -- This initialization is handled by the migration files
-    -- This ConfigMap is kept for compatibility but can be removed
-    SELECT 1;
+    -- Load AGE extension
+    LOAD 'age';
+    SET search_path = ag_catalog, "$user", public;
+
+    -- Create the social network graph if not exists
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM ag_catalog.ag_graph WHERE name = 'social_network'
+      ) THEN
+        PERFORM create_graph('social_network');
+      END IF;
+    END
+    $$;
+
+    -- Create vertex labels
+    SELECT * FROM cypher('social_network', $$
+      CREATE VLABEL IF NOT EXISTS User
+    $$) as (v agtype);
+
+    SELECT * FROM cypher('social_network', $$
+      CREATE VLABEL IF NOT EXISTS Book
+    $$) as (v agtype);
+
+    -- Create edge labels
+    SELECT * FROM cypher('social_network', $$
+      CREATE ELABEL IF NOT EXISTS PURCHASED
+    $$) as (e agtype);
+
+    SELECT * FROM cypher('social_network', $$
+      CREATE ELABEL IF NOT EXISTS FRIENDS_WITH
+    $$) as (e agtype);
+
+    SELECT * FROM cypher('social_network', $$
+      CREATE ELABEL IF NOT EXISTS RATED
+    $$) as (e agtype);
+
+    -- Create indexes for performance
+    CREATE INDEX IF NOT EXISTS idx_user_id ON ag_catalog._ag_label_vertex(properties)
+      WHERE label = (SELECT id FROM ag_catalog.ag_label WHERE name = 'User');
+
+    CREATE INDEX IF NOT EXISTS idx_book_isbn ON ag_catalog._ag_label_vertex(properties)
+      WHERE label = (SELECT id FROM ag_catalog.ag_label WHERE name = 'Book');
