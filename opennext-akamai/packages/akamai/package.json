@@ -1,0 +1,107 @@
+{
+  "name": "@opennextjs/akamai",
+  "version": "0.1.0",
+  "description": "OpenNext adapter for Akamai ecosystem (CDN, EdgeWorkers, LKE, Fermyon Spin)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./types": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/types/index.js"
+    },
+    "./overrides/incremental-cache/edgekv": {
+      "types": "./dist/cache/edgekv.d.ts",
+      "import": "./dist/cache/edgekv.js"
+    },
+    "./overrides/incremental-cache/object-storage": {
+      "types": "./dist/cache/object-storage.d.ts",
+      "import": "./dist/cache/object-storage.js"
+    },
+    "./overrides/incremental-cache/multi-tier": {
+      "types": "./dist/cache/multi-tier.d.ts",
+      "import": "./dist/cache/multi-tier.js"
+    },
+    "./overrides/queue/redis-streams": {
+      "types": "./dist/queue/redis-streams.d.ts",
+      "import": "./dist/queue/redis-streams.js"
+    },
+    "./overrides/converter/akamai-cdn": {
+      "types": "./dist/converters/akamai-cdn.d.ts",
+      "import": "./dist/converters/akamai-cdn.js"
+    },
+    "./overrides/wrapper/edgeworkers": {
+      "types": "./dist/wrappers/edgeworkers.d.ts",
+      "import": "./dist/wrappers/edgeworkers.js"
+    },
+    "./overrides/wrapper/fermyon": {
+      "types": "./dist/wrappers/fermyon.d.ts",
+      "import": "./dist/wrappers/fermyon.js"
+    },
+    "./adapters/lke": {
+      "types": "./dist/adapters/lke.d.ts",
+      "import": "./dist/adapters/lke.js"
+    },
+    "./adapters/fermyon": {
+      "types": "./dist/adapters/fermyon.d.ts",
+      "import": "./dist/adapters/fermyon.js"
+    }
+  },
+  "bin": {
+    "opennext-akamai": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.400.0",
+    "@aws-sdk/lib-storage": "^3.400.0",
+    "commander": "^12.0.0",
+    "esbuild": "^0.20.0",
+    "glob": "^10.3.0",
+    "ioredis": "^5.3.0",
+    "mime-types": "^2.1.35",
+    "picocolors": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^20.10.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0"
+  },
+  "peerDependencies": {
+    "@opennextjs/aws": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "nextjs",
+    "akamai",
+    "opennext",
+    "edgeworkers",
+    "linode",
+    "lke",
+    "fermyon",
+    "serverless",
+    "edge",
+    "cdn"
+  ],
+  "author": "OpenNext Community",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/opennextjs/opennextjs-akamai"
+  },
+  "homepage": "https://opennext.js.org/akamai"
+}
